@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import time
 
@@ -18,10 +18,6 @@ TZ = pytz.timezone("America/Santiago")
 # ==============================
 # FUNCIONES BASE DE DATOS
 # ==============================
-def get_all_registros():
-    response = supabase.table(TABLE_NAME).select("*").execute()
-    return response.data if response.data else []
-
 def lookup_by_guia(guia: str):
     response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return response.data[0] if response.data else None
@@ -48,6 +44,17 @@ def insert_no_coincidente(guia: str):
         "cantidad": 0
     }).execute()
 
+def get_logs(page: str):
+    """Obtiene logs de Supabase según la página (ingreso o impresión)."""
+    cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
+
+    if page == "ingresar":
+        response = supabase.table(TABLE_NAME).select("*").gte("fecha_ingreso", cutoff).order("fecha_ingreso", desc=True).execute()
+    else:
+        response = supabase.table(TABLE_NAME).select("*").gte("fecha_impresion", cutoff).order("fecha_impresion", desc=True).execute()
+
+    return response.data if response.data else []
+
 # ==============================
 # FUNCION PRINCIPAL DE ESCANEO
 # ==============================
@@ -57,32 +64,20 @@ def process_scan(guia: str):
     if match:
         if st.session_state.page == "ingresar":
             update_ingreso(guia)
-            match["fecha_ingreso"] = datetime.now(TZ).strftime("%d/%m/%Y %I:%M%p").lower()
-            match["estado_escaneo"] = "INGRESADO CORRECTAMENTE!"
+            st.success(f"📦 Guía {guia} ingresada correctamente")
 
         elif st.session_state.page == "imprimir":
             update_impresion(guia)
-            match["fecha_impresion"] = datetime.now(TZ).strftime("%d/%m/%Y %I:%M%p").lower()
             archivo = match.get("archivo_adjunto", "")
             if archivo:
-                st.success("Etiqueta disponible, iniciando descarga...")
-                st.markdown(
-                    f"""<meta http-equiv="refresh" content="0; url={archivo}" />""",
-                    unsafe_allow_html=True
-                )
+                st.success("Etiqueta disponible, abriendo en nueva pestaña...")
+                st.markdown(f"""<script>window.open("{archivo}", "_blank");</script>""", unsafe_allow_html=True)
             else:
                 st.warning("⚠️ Etiqueta no disponible")
 
-        st.session_state.logs[st.session_state.page].insert(0, match)
-
     else:
         insert_no_coincidente(guia)
-        st.session_state.logs[st.session_state.page].insert(0, {
-            "guia": guia,
-            "fecha_ingreso": datetime.now(TZ).strftime("%d/%m/%Y %I:%M%p").lower(),
-            "estado_escaneo": "NO COINCIDENTE!",
-            "cantidad": 0
-        })
+        st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
 
 # ==============================
 # UI
@@ -91,8 +86,6 @@ st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
 if "page" not in st.session_state:
     st.session_state.page = "ingresar"
-if "logs" not in st.session_state:
-    st.session_state.logs = {"ingresar": [], "imprimir": []}
 if "last_input" not in st.session_state:
     st.session_state.last_input = ""
 if "last_time" not in st.session_state:
@@ -107,17 +100,17 @@ with col2:
     if st.button("IMPRIMIR GUIAS"):
         st.session_state.page = "imprimir"
 
-# Cambiar color de fondo según la página
+# Fondo según página
 if st.session_state.page == "ingresar":
-    st.markdown("<style>body {background-color: #71A9D9;}</style>", unsafe_allow_html=True)
-elif st.session_state.page == "imprimir":
-    st.markdown("<style>body {background-color: #71D999;}</style>", unsafe_allow_html=True)
+    st.markdown("<style>.stApp{background-color: #71A9D9;}</style>", unsafe_allow_html=True)
+else:
+    st.markdown("<style>.stApp{background-color: #71D999;}</style>", unsafe_allow_html=True)
 
 # Título
 st.header("📦 " + ("INGRESAR PAQUETES" if st.session_state.page == "ingresar" else "IMPRIMIR GUIAS"))
 
-# Checkbox automático
-auto_scan = st.checkbox("Escaneo automático", value=True)
+# Checkbox automático (por defecto desactivado)
+auto_scan = st.checkbox("Escaneo automático", value=False)
 
 # Input de escaneo
 scan_val = st.text_area("Escanea aquí (o pega el número de guía)", key="scan_input")
@@ -136,10 +129,11 @@ if auto_scan:
             st.session_state.last_time = now
 
 # ==============================
-# TABLA LOG
+# TABLA LOG DIRECTO DE SUPABASE
 # ==============================
-st.subheader("Registro de escaneos")
-df = pd.DataFrame(st.session_state.logs[st.session_state.page])
+st.subheader("Registro de escaneos (últimos 60 días)")
+rows = get_logs(st.session_state.page)
+df = pd.DataFrame(rows)
 
 # Columnas visibles
 visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
@@ -147,7 +141,7 @@ visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
 
 df = df[[c for c in visible_cols if c in df.columns]]
 
-# Reemplazar archivo_adjunto por botones de descarga
+# Botón de descarga en columna archivo_adjunto
 if "archivo_adjunto" in df.columns:
     def make_button(url):
         if url:
@@ -155,7 +149,7 @@ if "archivo_adjunto" in df.columns:
         return "No disponible"
     df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
 
-# Mostrar tabla ordenada
+# Mostrar tabla
 if not df.empty:
     st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
 else:
@@ -163,4 +157,4 @@ else:
 
 # Export CSV
 csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("Download Filtered CSV", csv, "log.csv", "text/csv")
+st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
