@@ -12,7 +12,9 @@ st.set_page_config(page_title="Scanner de Bodega", layout="wide")
 # =========================
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+TABLE_NAME = "paquetes_mercadoenvios_chile"  # 👈 nombre correcto de tu tabla
 
 # =========================
 # Estado de sesión
@@ -24,7 +26,7 @@ if "last_scan" not in st.session_state:
 if "auto_search" not in st.session_state:
     st.session_state.auto_search = True
 if "page" not in st.session_state:
-    st.session_state.page = "ingresar"  # página inicial
+    st.session_state.page = "ingresar"
 
 # =========================
 # Columnas visibles en la tabla
@@ -108,13 +110,13 @@ with col2:
 # =========================
 def lookup_by_guia(guia: str) -> dict | None:
     """Busca la guía en Supabase y devuelve un diccionario."""
-    response = supabase.table("paquetes").select("*").eq("guia", guia).execute()
+    response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return response.data[0] if response.data else None
 
 def insert_no_coincidente(guia: str):
     """Inserta un paquete no coincidente en Supabase."""
     now_str = datetime.now().isoformat()
-    supabase.table("paquetes").insert({
+    supabase.table(TABLE_NAME).insert({
         "guia": guia,
         "fecha_ingreso": now_str,
         "estado_escaneo": "NO COINCIDENTE",
@@ -122,14 +124,14 @@ def insert_no_coincidente(guia: str):
 
 def update_ingreso(guia: str):
     """Actualiza fecha_ingreso y estado_escaneo en Supabase."""
-    supabase.table("paquetes").update({
+    supabase.table(TABLE_NAME).update({
         "fecha_ingreso": datetime.now().isoformat(),
         "estado_escaneo": "INGRESADO CORRECTAMENTE!"
     }).eq("guia", guia).execute()
 
 def update_impresion(guia: str):
     """Actualiza fecha_impresion en Supabase."""
-    supabase.table("paquetes").update({
+    supabase.table(TABLE_NAME).update({
         "fecha_impresion": datetime.now().isoformat()
     }).eq("guia", guia).execute()
 
@@ -168,7 +170,6 @@ def process_scan(guia: str):
             "comentario": "",
         }
 
-    # evita duplicado inmediato
     if not st.session_state.rows or st.session_state.rows[-1] != match:
         st.session_state.rows.append(match)
 
