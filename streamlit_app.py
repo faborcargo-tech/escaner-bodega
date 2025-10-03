@@ -3,8 +3,16 @@ import time
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+from supabase import create_client, Client
 
 st.set_page_config(page_title="Scanner de Bodega", layout="wide")
+
+# =========================
+# Conexión con Supabase
+# =========================
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =========================
 # Estado de sesión
@@ -19,50 +27,21 @@ if "page" not in st.session_state:
     st.session_state.page = "ingresar"  # página inicial
 
 # =========================
-# Base de datos simulada (MOCK)
+# Columnas visibles en la tabla
 # =========================
-MOCK_DB = {
-    "712946833130": {
-        "ASIGNACION": "FBC7654",
-        "GUIA": "712946833130",
-        "FECHA DE INGRESO": "26/09/2025 10:24am",
-        "ESTADO ESCANEO": "PENDIENTE",
-        "ASIN": "B08BNS3D8G",
-        "QUANTITY": 1,
-        "ESTADO ORDEN": "approved",
-        "Estado de Envio": "pending",
-    },
-    "712946950192": {
-        "ASIGNACION": "FBC7655",
-        "GUIA": "712946950192",
-        "FECHA DE INGRESO": "26/09/2025 10:24am",
-        "ESTADO ESCANEO": "PENDIENTE",
-        "ASIN": "B0CDWS1NL6",
-        "QUANTITY": 1,
-        "ESTADO ORDEN": "approved",
-        "Estado de Envio": "pending",
-    },
-    "712946830680": {
-        "ASIGNACION": "FBC7650",
-        "GUIA": "712946830680",
-        "FECHA DE INGRESO": "26/09/2025 10:24am",
-        "ESTADO ESCANEO": "PENDIENTE",
-        "ASIN": "B000GVFLIO",
-        "QUANTITY": 1,
-        "ESTADO ORDEN": "approved",
-        "Estado de Envio": "pending",
-    },
-}
-
 COLUMNS = [
-    "ASIGNACION",
-    "GUIA",
-    "FECHA DE INGRESO",
-    "ESTADO ESCANEO",
-    "ASIN",
-    "QUANTITY",
-    "ESTADO ORDEN",
-    "Estado de Envio",
+    "asignacion",
+    "guia",
+    "fecha_ingreso",
+    "fecha_impresion",
+    "estado_escaneo",
+    "asin",
+    "cantidad",
+    "estado_orden",
+    "estado_envio",
+    "archivo_adjunto",
+    "url_imagen",
+    "comentario",
 ]
 
 # =========================
@@ -70,9 +49,9 @@ COLUMNS = [
 # =========================
 def set_page_style():
     if st.session_state.page == "ingresar":
-        bg_color = "#71A9D9"
+        bg_color = "#71A9D9"  # azul
     else:
-        bg_color = "#71D999"
+        bg_color = "#71D999"  # verde
 
     st.markdown(
         f"""
@@ -111,10 +90,7 @@ set_page_style()
 # =========================
 # Navegación
 # =========================
-st.markdown('<div class="nav-container">', unsafe_allow_html=True)
-
 col1, col2 = st.columns([1, 1])
-
 with col1:
     if st.button("INGRESAR PAQUETES", key="btn_ingresar"):
         st.session_state.page = "ingresar"
@@ -127,50 +103,83 @@ with col2:
         set_page_style()
         st.rerun()
 
-st.markdown('</div>', unsafe_allow_html=True)
-
 # =========================
-# Funciones comunes
+# Funciones de Supabase
 # =========================
 def lookup_by_guia(guia: str) -> dict | None:
-    return MOCK_DB.get(guia)
+    """Busca la guía en Supabase y devuelve un diccionario."""
+    response = supabase.table("paquetes").select("*").eq("guia", guia).execute()
+    return response.data[0] if response.data else None
 
+def insert_no_coincidente(guia: str):
+    """Inserta un paquete no coincidente en Supabase."""
+    now_str = datetime.now().isoformat()
+    supabase.table("paquetes").insert({
+        "guia": guia,
+        "fecha_ingreso": now_str,
+        "estado_escaneo": "NO COINCIDENTE",
+    }).execute()
+
+def update_ingreso(guia: str):
+    """Actualiza fecha_ingreso y estado_escaneo en Supabase."""
+    supabase.table("paquetes").update({
+        "fecha_ingreso": datetime.now().isoformat(),
+        "estado_escaneo": "INGRESADO CORRECTAMENTE!"
+    }).eq("guia", guia).execute()
+
+def update_impresion(guia: str):
+    """Actualiza fecha_impresion en Supabase."""
+    supabase.table("paquetes").update({
+        "fecha_impresion": datetime.now().isoformat()
+    }).eq("guia", guia).execute()
+
+# =========================
+# Procesar escaneo
+# =========================
 def process_scan(guia: str):
     guia = guia.strip()
     if not guia:
         return
 
     match = lookup_by_guia(guia)
-    now_str = datetime.now().strftime("%d/%m/%Y %I:%M%p").lower()
 
     if match:
-        row = match.copy()
-        row["FECHA DE INGRESO"] = now_str
-        row["ESTADO ESCANEO"] = "INGRESADO CORRECTAMENTE!"
+        if st.session_state.page == "ingresar":
+            update_ingreso(guia)
+            match["fecha_ingreso"] = datetime.now().strftime("%d/%m/%Y %I:%M%p").lower()
+            match["estado_escaneo"] = "INGRESADO CORRECTAMENTE!"
+        elif st.session_state.page == "imprimir":
+            update_impresion(guia)
+            match["fecha_impresion"] = datetime.now().strftime("%d/%m/%Y %I:%M%p").lower()
     else:
-        row = {
-            "ASIGNACION": "",
-            "GUIA": guia,
-            "FECHA DE INGRESO": now_str,
-            "ESTADO ESCANEO": "NO COINCIDENTE!",
-            "ASIN": "",
-            "QUANTITY": 0,
-            "ESTADO ORDEN": "",
-            "Estado de Envio": "",
+        insert_no_coincidente(guia)
+        match = {
+            "asignacion": "",
+            "guia": guia,
+            "fecha_ingreso": datetime.now().strftime("%d/%m/%Y %I:%M%p").lower(),
+            "fecha_impresion": "",
+            "estado_escaneo": "NO COINCIDENTE!",
+            "asin": "",
+            "cantidad": 0,
+            "estado_orden": "",
+            "estado_envio": "",
+            "archivo_adjunto": "",
+            "url_imagen": "",
+            "comentario": "",
         }
 
-    if not st.session_state.rows or st.session_state.rows[-1] != row:
-        st.session_state.rows.append(row)
+    # evita duplicado inmediato
+    if not st.session_state.rows or st.session_state.rows[-1] != match:
+        st.session_state.rows.append(match)
 
     st.session_state.last_scan = guia
 
 # =========================
-# Contenido de páginas (idénticas en estructura)
+# Contenido de páginas
 # =========================
 if st.session_state.page == "ingresar":
     st.header("📦 INGRESAR PAQUETES")
-
-elif st.session_state.page == "imprimir":
+else:
     st.header("🖨️ IMPRIMIR GUIAS")
 
 # Caja de escaneo
@@ -216,11 +225,11 @@ df = (
 )
 
 if date_filter:
-    df = df[df["FECHA DE INGRESO"].str.contains(date_filter, case=False, na=False)]
+    df = df[df["fecha_ingreso"].str.contains(date_filter, case=False, na=False)]
 if estado_orden_filter:
-    df = df[df["ESTADO ORDEN"].str.contains(estado_orden_filter, case=False, na=False)]
+    df = df[df["estado_orden"].str.contains(estado_orden_filter, case=False, na=False)]
 if envio_filter:
-    df = df[df["Estado de Envio"].str.contains(envio_filter, case=False, na=False)]
+    df = df[df["estado_envio"].str.contains(envio_filter, case=False, na=False)]
 
 st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -232,4 +241,3 @@ st.download_button(
     file_name="paquetes_filtrados.csv",
     mime="text/csv",
 )
-
