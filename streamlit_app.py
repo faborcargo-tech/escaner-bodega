@@ -10,9 +10,9 @@ st.set_page_config(page_title="Scanner de Bodega", layout="wide")
 # Estado de sesión
 # =========================
 if "rows" not in st.session_state:
-    st.session_state.rows = []       # filas ya escaneadas que se muestran
+    st.session_state.rows = []
 if "last_scan" not in st.session_state:
-    st.session_state.last_scan = ""  # para evitar doble disparo
+    st.session_state.last_scan = ""
 if "auto_search" not in st.session_state:
     st.session_state.auto_search = True
 if "page" not in st.session_state:
@@ -66,175 +66,170 @@ COLUMNS = [
 ]
 
 # =========================
-# Estilos de navegación
+# Estilos personalizados
 # =========================
-st.markdown(
-    """
-    <style>
-    .nav-container {
-        display: flex;
-        gap: 20px;
-        margin-bottom: 25px;
-    }
-    .nav-button {
-        padding: 0.7em 1.5em;
-        border-radius: 10px;
-        font-weight: bold;
-        font-size: 15px;
-        cursor: pointer;
-        text-align: center;
-        color: white;
-    }
-    .nav-ingresar {
-        background-color: #71A9D9;
-    }
-    .nav-imprimir {
-        background-color: #71D999;
-    }
-    .nav-inactive {
-        opacity: 0.5;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+def set_page_style():
+    if st.session_state.page == "ingresar":
+        bg_color = "#71A9D9"
+    else:
+        bg_color = "#71D999"
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-color: {bg_color};
+        }}
+        .nav-container {{
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 25px;
+        }}
+        .nav-button {{
+            padding: 0.7em 1.5em;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 15px;
+            cursor: pointer;
+            text-align: center;
+            border: 2px solid black;
+            background-color: white;
+            color: black;
+        }}
+        .nav-button-active {{
+            background-color: black !important;
+            color: white !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+set_page_style()
 
 # =========================
 # Navegación
 # =========================
+st.markdown('<div class="nav-container">', unsafe_allow_html=True)
+
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    if st.button("INGRESAR PAQUETES", use_container_width=True):
+    if st.button("INGRESAR PAQUETES", key="btn_ingresar"):
         st.session_state.page = "ingresar"
+        set_page_style()
+        st.rerun()
 
 with col2:
-    if st.button("IMPRIMIR GUIAS", use_container_width=True):
+    if st.button("IMPRIMIR GUIAS", key="btn_imprimir"):
         st.session_state.page = "imprimir"
+        set_page_style()
+        st.rerun()
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
-# Contenido según página
+# Funciones comunes
+# =========================
+def lookup_by_guia(guia: str) -> dict | None:
+    return MOCK_DB.get(guia)
+
+def process_scan(guia: str):
+    guia = guia.strip()
+    if not guia:
+        return
+
+    match = lookup_by_guia(guia)
+    now_str = datetime.now().strftime("%d/%m/%Y %I:%M%p").lower()
+
+    if match:
+        row = match.copy()
+        row["FECHA DE INGRESO"] = now_str
+        row["ESTADO ESCANEO"] = "INGRESADO CORRECTAMENTE!"
+    else:
+        row = {
+            "ASIGNACION": "",
+            "GUIA": guia,
+            "FECHA DE INGRESO": now_str,
+            "ESTADO ESCANEO": "NO COINCIDENTE!",
+            "ASIN": "",
+            "QUANTITY": 0,
+            "ESTADO ORDEN": "",
+            "Estado de Envio": "",
+        }
+
+    if not st.session_state.rows or st.session_state.rows[-1] != row:
+        st.session_state.rows.append(row)
+
+    st.session_state.last_scan = guia
+
+# =========================
+# Contenido de páginas (idénticas en estructura)
 # =========================
 if st.session_state.page == "ingresar":
-    st.markdown('<div class="nav-button nav-ingresar">INGRESAR PAQUETES</div>', unsafe_allow_html=True)
-    st.markdown("### INGRESAR PAQUETES")
-
-    # -------------------------
-    # Toggle de escaneo automático
-    # -------------------------
-    st.checkbox(
-        "Escaneo automático",
-        key="auto_search",
-        help="Limpia el campo y vuelve a enfocar tras cada lectura.",
-        value=st.session_state.auto_search,
-    )
-
-    # -------------------------
-    # Funciones
-    # -------------------------
-    def lookup_by_guia(guia: str) -> dict | None:
-        return MOCK_DB.get(guia)
-
-    def process_scan(guia: str):
-        guia = guia.strip()
-        if not guia:
-            return
-
-        match = lookup_by_guia(guia)
-        now_str = datetime.now().strftime("%d/%m/%Y %I:%M%p").lower()
-
-        if match:
-            row = match.copy()
-            row["FECHA DE INGRESO"] = now_str
-            row["ESTADO ESCANEO"] = "INGRESADO CORRECTAMENTE!"
-        else:
-            row = {
-                "ASIGNACION": "",
-                "GUIA": guia,
-                "FECHA DE INGRESO": now_str,
-                "ESTADO ESCANEO": "NO COINCIDENTE!",
-                "ASIN": "",
-                "QUANTITY": 0,
-                "ESTADO ORDEN": "",
-                "Estado de Envio": "",
-            }
-
-        if not st.session_state.rows or st.session_state.rows[-1] != row:
-            st.session_state.rows.append(row)
-
-        st.session_state.last_scan = guia
-
-    # -------------------------
-    # Caja de escaneo
-    # -------------------------
-    scan_val = st.text_area(
-        "Escanea aquí (o pega el número de guía)",
-        height=80,
-        placeholder="Apunta el lector aquí y escanea…",
-        key="scan_input",
-    )
-
-    submit = st.button("Procesar escaneo", type="primary")
-
-    if submit or (st.session_state.auto_search and scan_val and scan_val != st.session_state.last_scan):
-        process_scan(scan_val)
-        if st.session_state.auto_search:
-            time.sleep(0.05)
-            st.session_state.pop("scan_input", None)
-            st.rerun()
-
-    st.divider()
-
-    # -------------------------
-    # Filtros rápidos
-    # -------------------------
-    c1, c2, c3 = st.columns([1.2, 1, 1])
-    with c1:
-        date_filter = st.text_input("FECHA DE INGRESO FILTER…")
-    with c2:
-        estado_orden_filter = st.text_input("ESTADO DE ORDEN FILTER…")
-    with c3:
-        envio_filter = st.text_input("Estado de Envio Filter…")
-
-    # -------------------------
-    # Tabla principal
-    # -------------------------
-    df = (
-        pd.DataFrame(st.session_state.rows, columns=COLUMNS)
-        if st.session_state.rows
-        else pd.DataFrame(columns=COLUMNS)
-    )
-
-    def apply_filters(_df: pd.DataFrame) -> pd.DataFrame:
-        if date_filter:
-            _df = _df[_df["FECHA DE INGRESO"].str.contains(date_filter, case=False, na=False)]
-        if estado_orden_filter:
-            _df = _df[_df["ESTADO ORDEN"].str.contains(estado_orden_filter, case=False, na=False)]
-        if envio_filter:
-            _df = _df[_df["Estado de Envio"].str.contains(envio_filter, case=False, na=False)]
-        return _df
-
-    filtered = apply_filters(df)
-
-    st.dataframe(
-        filtered,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # -------------------------
-    # Descarga CSV
-    # -------------------------
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download Filtered CSV",
-        data=csv_bytes,
-        file_name="paquetes_filtrados.csv",
-        mime="text/csv",
-    )
+    st.header("📦 INGRESAR PAQUETES")
 
 elif st.session_state.page == "imprimir":
-    st.markdown('<div class="nav-button nav-imprimir">IMPRIMIR GUIAS</div>', unsafe_allow_html=True)
-    st.markdown("### IMPRIMIR GUIAS")
-    st.info("Aquí pondrás la lógica para imprimir guías.")
+    st.header("🖨️ IMPRIMIR GUIAS")
+
+# Caja de escaneo
+st.checkbox(
+    "Escaneo automático",
+    key="auto_search",
+    help="Limpia el campo y vuelve a enfocar tras cada lectura.",
+    value=st.session_state.auto_search,
+)
+
+scan_val = st.text_area(
+    "Escanea aquí (o pega el número de guía)",
+    height=80,
+    placeholder="Apunta el lector aquí y escanea…",
+    key="scan_input",
+)
+
+submit = st.button("Procesar escaneo", type="primary")
+
+if submit or (st.session_state.auto_search and scan_val and scan_val != st.session_state.last_scan):
+    process_scan(scan_val)
+    if st.session_state.auto_search:
+        time.sleep(0.05)
+        st.session_state.pop("scan_input", None)
+        st.rerun()
+
+st.divider()
+
+# Filtros
+c1, c2, c3 = st.columns([1.2, 1, 1])
+with c1:
+    date_filter = st.text_input("FECHA DE INGRESO FILTER…")
+with c2:
+    estado_orden_filter = st.text_input("ESTADO DE ORDEN FILTER…")
+with c3:
+    envio_filter = st.text_input("Estado de Envio Filter…")
+
+# Tabla
+df = (
+    pd.DataFrame(st.session_state.rows, columns=COLUMNS)
+    if st.session_state.rows
+    else pd.DataFrame(columns=COLUMNS)
+)
+
+if date_filter:
+    df = df[df["FECHA DE INGRESO"].str.contains(date_filter, case=False, na=False)]
+if estado_orden_filter:
+    df = df[df["ESTADO ORDEN"].str.contains(estado_orden_filter, case=False, na=False)]
+if envio_filter:
+    df = df[df["Estado de Envio"].str.contains(envio_filter, case=False, na=False)]
+
+st.dataframe(df, use_container_width=True, hide_index=True)
+
+# Descarga CSV
+csv_bytes = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "Download Filtered CSV",
+    data=csv_bytes,
+    file_name="paquetes_filtrados.csv",
+    mime="text/csv",
+)
 
