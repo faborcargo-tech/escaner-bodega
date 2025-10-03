@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-from supabase import create_client, Client
+from supabase import create_client  # usando supabase-py
 
 st.set_page_config(page_title="Scanner de Bodega", layout="wide")
 
@@ -12,7 +12,7 @@ st.set_page_config(page_title="Scanner de Bodega", layout="wide")
 # =========================
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =========================
 # Estado de sesión
@@ -225,11 +225,11 @@ df = (
 )
 
 if date_filter:
-    df = df[df["fecha_ingreso"].str.contains(date_filter, case=False, na=False)]
+    df = df[df["fecha_ingreso"].astype(str).str.contains(date_filter, case=False, na=False)]
 if estado_orden_filter:
-    df = df[df["estado_orden"].str.contains(estado_orden_filter, case=False, na=False)]
+    df = df[df["estado_orden"].astype(str).str.contains(estado_orden_filter, case=False, na=False)]
 if envio_filter:
-    df = df[df["estado_envio"].str.contains(envio_filter, case=False, na=False)]
+    df = df[df["estado_envio"].astype(str).str.contains(envio_filter, case=False, na=False)]
 
 st.dataframe(df, use_container_width=True, hide_index=True)
 
