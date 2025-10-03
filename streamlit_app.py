@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-from supabase import create_client  # usando supabase-py
+from supabase import create_client, Client
 
 st.set_page_config(page_title="Scanner de Bodega", layout="wide")
 
