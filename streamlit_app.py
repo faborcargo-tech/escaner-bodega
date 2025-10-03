@@ -114,6 +114,7 @@ def lookup_by_guia(guia: str) -> dict | None:
     """Busca la guía en Supabase y devuelve un diccionario."""
     try:
         response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
+        st.write("🔎 Resultado de la consulta:", response.data)  # 👈 Debug
         return response.data[0] if response.data else None
     except Exception as e:
         st.error(f"❌ Error al consultar guía {guia}: {e}")
