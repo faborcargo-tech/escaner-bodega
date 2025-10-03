@@ -144,7 +144,9 @@ if submit or (st.session_state.auto_search and scan_val and scan_val != st.sessi
     process_scan(scan_val)
     if st.session_state.auto_search:
         time.sleep(0.05)
-        st.session_state.scan_input = ""  # limpia el campo
+        # Limpiar campo correctamente
+        st.session_state.pop("scan_input", None)
+        st.rerun()
         st.experimental_rerun()
 
 st.divider()
