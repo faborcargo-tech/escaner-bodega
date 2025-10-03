@@ -37,12 +37,24 @@ def update_impresion(guia: str):
 
 def insert_no_coincidente(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).insert({
-        "guia": guia,
-        "fecha_ingreso": now.isoformat(),
-        "estado_escaneo": "NO COINCIDENTE!",
-        "cantidad": 0
-    }).execute()
+    try:
+        supabase.table(TABLE_NAME).insert({
+            "asignacion": "",
+            "guia": guia,
+            "fecha_ingreso": now.isoformat(),
+            "estado_escaneo": "NO COINCIDENTE!",
+            "asin": "",
+            "cantidad": 0,
+            "estado_orden": "",
+            "estado_envio": "",
+            "archivo_adjunto": "",
+            "url_imagen": "",
+            "comentario": "",
+            "descripcion": "",
+            "titulo": ""
+        }).execute()
+    except Exception as e:
+        st.error(f"❌ Error al insertar NO COINCIDENTE ({guia}): {e}")
 
 def get_logs(page: str):
     """Obtiene logs de Supabase según la página (ingreso o impresión)."""
@@ -109,7 +121,7 @@ else:
 # Título
 st.header("📦 " + ("INGRESAR PAQUETES" if st.session_state.page == "ingresar" else "IMPRIMIR GUIAS"))
 
-# Checkbox automático (por defecto desactivado)
+# Checkbox automático (desactivado por defecto)
 auto_scan = st.checkbox("Escaneo automático", value=False)
 
 # Input de escaneo
@@ -141,7 +153,7 @@ visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
 
 df = df[[c for c in visible_cols if c in df.columns]]
 
-# Botón de descarga en columna archivo_adjunto
+# Botón en columna archivo_adjunto
 if "archivo_adjunto" in df.columns:
     def make_button(url):
         if url:
@@ -158,3 +170,4 @@ else:
 # Export CSV
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
+
