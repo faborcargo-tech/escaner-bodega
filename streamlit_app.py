@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import pytz
 import time
+import io
 
 # ==============================
 # CONFIG
@@ -15,7 +16,43 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TABLE_NAME = "paquetes_mercadoenvios_chile"
+STORAGE_BUCKET = "etiquetas"  # bucket público para PDFs
 TZ = pytz.timezone("America/Santiago")
+
+# ==============================
+# STORAGE (PDFs)
+# ==============================
+def ensure_storage_bucket():
+    """Crea el bucket público si no existe."""
+    try:
+        buckets = supabase.storage.list_buckets()  # v2 client
+        if not any(b.get("name") == STORAGE_BUCKET for b in buckets):
+            supabase.storage.create_bucket(STORAGE_BUCKET, public=True)
+    except Exception as e:
+        st.warning(f"⚠️ No se pudo verificar/crear bucket '{STORAGE_BUCKET}': {e}")
+
+def upload_pdf_to_storage(asignacion: str, file) -> str | None:
+    """
+    Sube el PDF al bucket 'etiquetas' con nombre <asignacion>.pdf
+    Devuelve la URL pública o None si falla.
+    """
+    if not asignacion:
+        st.error("La asignación es requerida para subir el PDF.")
+        return None
+    try:
+        ensure_storage_bucket()
+        key_path = f"{asignacion}.pdf"  # guardamos con este nombre para que el navegador use ese filename
+        data = file.getvalue() if hasattr(file, "getvalue") else file.read()
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            path=key_path,
+            file=io.BytesIO(data),
+            file_options={"content-type": "application/pdf", "upsert": True},
+        )
+        public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
+        return public_url
+    except Exception as e:
+        st.error(f"❌ Error subiendo PDF: {e}")
+        return None
 
 # ==============================
 # FUNCIONES BASE DE DATOS (EXISTENTES)
@@ -83,9 +120,17 @@ def process_scan(guia: str):
         elif st.session_state.page == "imprimir":
             update_impresion(guia)
             archivo = match.get("archivo_adjunto", "")
+            asignacion = match.get("asignacion", "etiqueta")
             if archivo:
-                st.success("Etiqueta disponible, abriendo en nueva pestaña...")
-                st.markdown(f"""<script>window.open("{archivo}", "_blank");</script>""", unsafe_allow_html=True)
+                st.success("Etiqueta disponible, descargando...")
+                # Forzar nombre de archivo en la descarga
+                js = f"""
+                var a=document.createElement('a');
+                a.href='{archivo}';
+                a.download='{asignacion}.pdf';
+                document.body.appendChild(a);a.click();a.remove();
+                """
+                st.components.v1.html(f"<script>{js}</script>", height=0)
             else:
                 st.warning("⚠️ Etiqueta no disponible")
 
@@ -129,10 +174,8 @@ def datos_defaults():
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        # búsqueda básica en varias columnas
-        q = q.ilike("asignacion", f"%{search}%")  # seed
-        # NOTA: el cliente supabase-py no permite múltiples ilike encadenados como OR.
-        # Hacemos una aproximación: intentamos por asignación primero; si viene vacío, probamos otras columnas.
+        # búsqueda básica en varias columnas (fallback secuencial)
+        q = q.ilike("asignacion", f"%{search}%")
         res = q.range(offset, offset + limit - 1).execute()
         data = res.data or []
         if not data:
@@ -147,7 +190,7 @@ def datos_fetch(limit=200, offset=0, search:str=""):
         return res.data or []
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
-    """Sin usar .or_(): hacemos hasta 3 consultas y unimos resultados por id."""
+    """Sin .or_(): hacemos hasta 3 consultas y unimos resultados por id."""
     seen = {}
     if asignacion:
         res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("asignacion", asignacion).limit(50).execute()
@@ -228,6 +271,9 @@ def _render_form_contents():
     data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
     data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
 
+    # === NUEVO: subir PDF
+    pdf_file = st.file_uploader("Subir etiqueta PDF", type=["pdf"], accept_multiple_files=False)
+
     col_btn1, col_btn2 = st.columns([1,1])
     submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
     cancel    = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
@@ -237,6 +283,17 @@ def _render_form_contents():
         st.rerun()
 
     if submitted:
+        # Si hay PDF adjunto, lo subimos y seteamos archivo_adjunto
+        if pdf_file is not None:
+            # Para crear/editar: usamos el nombre <asignacion>.pdf
+            asign = (data.get("asignacion") or "").strip()
+            if not asign:
+                st.error("Debes completar 'asignacion' para subir el PDF.")
+                return
+            url_pdf = upload_pdf_to_storage(asign, pdf_file)
+            if url_pdf:
+                data["archivo_adjunto"] = url_pdf
+
         if st.session_state.datos_modal_mode == "new":
             missing = [f for f in REQUIRED_FIELDS if not str(data.get(f, "")).strip()]
             if missing:
@@ -339,7 +396,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
     if "archivo_adjunto" in df.columns:
         def make_button(url):
             if url:
-                return f'<a href="{url}" target="_blank"><button>Descargar</button></a>'
+                return f'<a href="{url}" target="_blank" download><button>Descargar</button></a>'
             return "No disponible"
         df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
 
@@ -357,7 +414,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
 
-    # Controles superiores (sin 'Solo sin guía' aquí)
+    # Controles superiores
     colf1, colf2, colf4 = st.columns([2,1,1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
@@ -380,7 +437,7 @@ if st.session_state.page == "datos":
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
-    # 'Solo sin guía' pegado a la tabla (debajo de los controles)
+    # 'Solo sin guía' pegado a la tabla
     solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
@@ -403,7 +460,6 @@ if st.session_state.page == "datos":
                 "Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)
             }
 
-        # Reordenamos: primero Editar, luego el resto
         ordered_cols = ["Editar"] + show_cols
 
         edited_df = st.data_editor(
@@ -415,7 +471,6 @@ if st.session_state.page == "datos":
             column_config=column_config
         )
 
-        # Detectar click/selección en 'Editar'
         try:
             if "Editar" in edited_df.columns and edited_df["Editar"].any():
                 idx = edited_df.index[edited_df["Editar"]].tolist()[0]
