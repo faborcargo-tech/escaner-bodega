@@ -216,7 +216,7 @@ def _render_form_contents():
 
     if cancel:
         close_modal()
-        st.experimental_rerun()
+        st.rerun()
 
     if submitted:
         if st.session_state.datos_modal_mode == "new":
@@ -232,18 +232,18 @@ def _render_form_contents():
                     datos_insert(data)
                     st.success("Registro insertado (forzado).")
                     close_modal()
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 datos_insert(data)
                 st.success("Registro insertado correctamente.")
                 close_modal()
-                st.experimental_rerun()
+                st.rerun()
         else:
             rid = int(data["id"])
             datos_update(rid, data)
             st.success(f"Registro {rid} actualizado.")
             close_modal()
-            st.experimental_rerun()
+            st.rerun()
 
 def render_modal_if_needed():
     if not st.session_state.datos_modal_open:
@@ -401,4 +401,5 @@ if st.session_state.page == "datos":
             pass
 
     render_modal_if_needed()
+
 
