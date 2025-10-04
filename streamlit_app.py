@@ -164,6 +164,8 @@ if "datos_modal_mode" not in st.session_state:
     st.session_state.datos_modal_mode = "new"  # "new" | "edit"
 if "datos_modal_row" not in st.session_state:
     st.session_state.datos_modal_row = datos_defaults()
+if "datos_offset" not in st.session_state:
+    st.session_state.datos_offset = 0
 
 def open_modal_new():
     st.session_state.datos_modal_mode = "new"
@@ -172,7 +174,6 @@ def open_modal_new():
 
 def open_modal_edit(row: dict):
     st.session_state.datos_modal_mode = "edit"
-    # Prepara row con todas las llaves esperadas
     base = datos_defaults()
     base.update({k: row.get(k) for k in row.keys()})
     st.session_state.datos_modal_row = base
@@ -251,7 +252,6 @@ def _render_form_contents():
             close_modal()
             st.experimental_rerun()
 
-# wrapper modal: usa st.dialog si existe; fallback a expander
 def render_modal_if_needed():
     if not st.session_state.datos_modal_open:
         return
@@ -344,24 +344,24 @@ if st.session_state.page in ("ingresar", "imprimir"):
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# NUEVO: PÁGINA DATOS
+# NUEVO: PÁGINA DATOS (tabla con lápiz por fila + filtros y orden)
 # ==============================
 if st.session_state.page == "datos":
     st.markdown("<div style='background:#F2F4F4;padding:10px;border-radius:8px;'><h3>Base de datos</h3></div>", unsafe_allow_html=True)
 
-    # ---- Controles de tabla ----
-    colf1, colf2, colf3 = st.columns([2,1,1])
+    # ---- Controles superiores ----
+    colf1, colf2, colf3, colf4 = st.columns([2,1,1,1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
     with colf2:
         page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
     with colf3:
+        solo_sin_guia = st.checkbox("Solo sin guía", value=False)
+    with colf4:
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
     # Paginación simple
-    if "datos_offset" not in st.session_state:
-        st.session_state.datos_offset = 0
     colp1, colp2, colp3 = st.columns([1,1,6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
@@ -374,23 +374,47 @@ if st.session_state.page == "datos":
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
+    # Filtro rápido "solo sin guía"
+    if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
+        df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
+
     if df_all.empty:
         st.info("Sin registros para mostrar.")
     else:
-        # Mostrar tabla de datos
+        # ---- Agregar columna de botón por fila dentro de la tabla ----
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
-        st.dataframe(df_all[show_cols], use_container_width=True, hide_index=True)
+        # Creamos columna 'Editar' con False por defecto; el botón la pone True por 1 rerun
+        df_all = df_all.copy()
+        df_all["Editar"] = False
 
-        # Botones de edición por fila (para las filas visibles)
-        st.subheader("Acciones por fila")
-        for _, row in df_all.iterrows():
-            with st.container():
-                c1, c2, c3, c4 = st.columns([6,1,1,1])
-                c1.caption(f"ID {row['id']} · asignacion: {row.get('asignacion','')} · orden_meli: {row.get('orden_meli','')}")
-                if c2.button("✏️ Editar", key=f"edit_{row['id']}"):
-                    open_modal_edit(row.to_dict())
-                # podrías agregar más acciones aquí si lo necesitas
-        st.caption("Tip: Usa el buscador para filtrar y luego edita la fila que necesites.")
+        edited_df = st.data_editor(
+            df_all[show_cols + ["Editar"]],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",              # sin agregar/eliminar filas desde la tabla
+            disabled=show_cols,            # deshabilita edición de datos (solo botón)
+            column_config={
+                "Editar": st.column_config.ButtonColumn(
+                    "Editar",
+                    help="Editar fila",
+                    icon="✏️",
+                    width="small"
+                )
+            }
+        )
+
+        # Si se pulsó algún botón 'Editar', abrimos el modal con esa fila
+        try:
+            if "Editar" in edited_df.columns and edited_df["Editar"].any():
+                # Toma la primera fila con True
+                idx = edited_df.index[edited_df["Editar"]].tolist()[0]
+                row_dict = edited_df.loc[idx].to_dict()
+                # quitar la clave del botón
+                row_dict.pop("Editar", None)
+                open_modal_edit(row_dict)
+        except Exception:
+            pass
 
     # Renderiza la ventana emergente si corresponde
     render_modal_if_needed()
+
