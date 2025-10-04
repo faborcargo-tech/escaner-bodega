@@ -70,7 +70,7 @@ def get_logs(page: str):
     return response.data if response.data else []
 
 # ==============================
-# FUNCION PRINCIPAL DE ESCANEO (EXISTENTE)
+# FUNCION PRINCIPAL DE ESCANEO
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -94,7 +94,7 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
 
 # ==============================
-# NUEVO: HELPERS PARA SECCIÓN DATOS (MODAL + CRUD)
+# HELPERS PARA SECCIÓN DATOS
 # ==============================
 ALL_COLUMNS = [
     "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
@@ -103,7 +103,7 @@ ALL_COLUMNS = [
     "fecha_impresion", "titulo", "orden_meli", "pack_id"
 ]
 REQUIRED_FIELDS = ["asignacion", "orden_meli"]
-LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]  # bloqueadas SOLO en edición
+LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]
 
 def datos_defaults():
     return dict(
@@ -129,7 +129,6 @@ def datos_defaults():
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        # Búsqueda simple por asignacion/guia/orden_meli/pack_id/titulo
         q = q.or_(f"asignacion.ilike.%{search}%,guia.ilike.%{search}%,orden_meli.ilike.%{search}%,pack_id.ilike.%{search}%,titulo.ilike.%{search}%")
     q = q.range(offset, offset + limit - 1)
     res = q.execute()
@@ -151,17 +150,16 @@ def datos_insert(payload: dict):
     return supabase.table(TABLE_NAME).insert(clean).execute()
 
 def datos_update(id_val: int, payload: dict):
-    # En edición, nunca aceptamos cambios en LOCKED_FIELDS_EDIT
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
     if not clean:
         return None
     return supabase.table(TABLE_NAME).update(clean).eq("id", id_val).execute()
 
-# ======== UI STATE para modal ========
+# ======== UI STATE MODAL ========
 if "datos_modal_open" not in st.session_state:
     st.session_state.datos_modal_open = False
 if "datos_modal_mode" not in st.session_state:
-    st.session_state.datos_modal_mode = "new"  # "new" | "edit"
+    st.session_state.datos_modal_mode = "new"
 if "datos_modal_row" not in st.session_state:
     st.session_state.datos_modal_row = datos_defaults()
 if "datos_offset" not in st.session_state:
@@ -182,7 +180,6 @@ def open_modal_edit(row: dict):
 def close_modal():
     st.session_state.datos_modal_open = False
 
-# ======== Modal (con fallback si la versión de Streamlit no lo soporta) ========
 def _render_form_contents():
     mode = st.session_state.datos_modal_mode
     data = st.session_state.datos_modal_row.copy()
@@ -190,7 +187,6 @@ def _render_form_contents():
     st.write("**Modo:** ", "Crear nuevo" if mode == "new" else f"Editar ID {data.get('id')}")
     colA, colB, colC = st.columns(3)
 
-    # asignacion / orden_meli bloqueados solo en edición
     if mode == "edit":
         data["asignacion"] = colA.text_input("asignacion", value=data.get("asignacion") or "", disabled=True)
         data["orden_meli"] = colB.text_input("orden_meli", value=data.get("orden_meli") or "", disabled=True)
@@ -224,17 +220,15 @@ def _render_form_contents():
 
     if submitted:
         if st.session_state.datos_modal_mode == "new":
-            # validar requeridos
             missing = [f for f in REQUIRED_FIELDS if not str(data.get(f, "")).strip()]
             if missing:
                 st.error(f"Faltan campos obligatorios: {', '.join(missing)}")
                 return
-            # duplicados
             dups = datos_find_duplicates(data["asignacion"].strip(), data["orden_meli"].strip(), (data.get("pack_id") or "").strip())
             if dups:
-                st.warning("⚠️ Existen registros coincidentes por asignacion / orden_meli / pack_id:")
+                st.warning("⚠️ Existen registros coincidentes:")
                 st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
-                if st.checkbox("Forzar inserción a pesar de duplicados", key="force_insert"):
+                if st.checkbox("Forzar inserción", key="force_insert"):
                     datos_insert(data)
                     st.success("Registro insertado (forzado).")
                     close_modal()
@@ -245,7 +239,6 @@ def _render_form_contents():
                 close_modal()
                 st.experimental_rerun()
         else:
-            # edición: nunca tocamos asignacion/orden_meli
             rid = int(data["id"])
             datos_update(rid, data)
             st.success(f"Registro {rid} actualizado.")
@@ -261,7 +254,7 @@ def render_modal_if_needed():
             _render_form_contents()
         _show_dialog()
     else:
-        with st.expander("Formulario de registro (vista emergente)", expanded=True):
+        with st.expander("Formulario de registro", expanded=True):
             _render_form_contents()
 
 # ==============================
@@ -274,7 +267,6 @@ if "last_input" not in st.session_state:
 if "last_time" not in st.session_state:
     st.session_state.last_time = time.time()
 
-# Barra de navegación
 col1, col2, col3 = st.columns([1,1,1])
 with col1:
     if st.button("INGRESAR PAQUETES"):
@@ -286,7 +278,6 @@ with col3:
     if st.button("🗃️ DATOS"):
         st.session_state.page = "datos"
 
-# Fondo según página
 if st.session_state.page == "ingresar":
     st.markdown("<style>.stApp{background-color: #71A9D9;}</style>", unsafe_allow_html=True)
 elif st.session_state.page == "imprimir":
@@ -294,14 +285,13 @@ elif st.session_state.page == "imprimir":
 else:
     st.markdown("<style>.stApp{background-color: #F2F4F4;}</style>", unsafe_allow_html=True)
 
-# Título
 st.header(
     "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
 # ==============================
-# ESCANEO (solo ingresar/imprimir)
+# ESCANEO
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     auto_scan = st.checkbox("Escaneo automático", value=False)
@@ -317,7 +307,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
                 st.session_state.last_time = now_t
 
 # ==============================
-# TABLA LOG (solo ingresar/imprimir)
+# TABLA LOG
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     st.subheader("Registro de escaneos (últimos 60 días)")
@@ -344,12 +334,11 @@ if st.session_state.page in ("ingresar", "imprimir"):
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# NUEVO: PÁGINA DATOS (tabla con lápiz por fila + filtros y orden)
+# PÁGINA DATOS (con ButtonColumn o CheckboxColumn)
 # ==============================
 if st.session_state.page == "datos":
     st.markdown("<div style='background:#F2F4F4;padding:10px;border-radius:8px;'><h3>Base de datos</h3></div>", unsafe_allow_html=True)
 
-    # ---- Controles superiores ----
     colf1, colf2, colf3, colf4 = st.columns([2,1,1,1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
@@ -361,7 +350,6 @@ if st.session_state.page == "datos":
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
-    # Paginación simple
     colp1, colp2, colp3 = st.columns([1,1,6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
@@ -370,51 +358,47 @@ if st.session_state.page == "datos":
         if st.button("Siguiente ⟶"):
             st.session_state.datos_offset += page_size
 
-    # Trae datos
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
-    # Filtro rápido "solo sin guía"
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
 
     if df_all.empty:
         st.info("Sin registros para mostrar.")
     else:
-        # ---- Agregar columna de botón por fila dentro de la tabla ----
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
-        # Creamos columna 'Editar' con False por defecto; el botón la pone True por 1 rerun
         df_all = df_all.copy()
-        df_all["Editar"] = False
+
+        has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
+        if has_button_col:
+            df_all["Editar"] = False
+            column_config = {
+                "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
+            }
+        else:
+            df_all["Editar"] = False
+            column_config = {
+                "Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)
+            }
 
         edited_df = st.data_editor(
             df_all[show_cols + ["Editar"]],
             use_container_width=True,
             hide_index=True,
-            num_rows="fixed",              # sin agregar/eliminar filas desde la tabla
-            disabled=show_cols,            # deshabilita edición de datos (solo botón)
-            column_config={
-                "Editar": st.column_config.ButtonColumn(
-                    "Editar",
-                    help="Editar fila",
-                    icon="✏️",
-                    width="small"
-                )
-            }
+            num_rows="fixed",
+            disabled=show_cols,
+            column_config=column_config
         )
 
-        # Si se pulsó algún botón 'Editar', abrimos el modal con esa fila
         try:
             if "Editar" in edited_df.columns and edited_df["Editar"].any():
-                # Toma la primera fila con True
                 idx = edited_df.index[edited_df["Editar"]].tolist()[0]
                 row_dict = edited_df.loc[idx].to_dict()
-                # quitar la clave del botón
                 row_dict.pop("Editar", None)
                 open_modal_edit(row_dict)
         except Exception:
             pass
 
-    # Renderiza la ventana emergente si corresponde
     render_modal_if_needed()
 
