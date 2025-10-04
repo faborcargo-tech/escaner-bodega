@@ -129,21 +129,39 @@ def datos_defaults():
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        q = q.or_(f"asignacion.ilike.%{search}%,guia.ilike.%{search}%,orden_meli.ilike.%{search}%,pack_id.ilike.%{search}%,titulo.ilike.%{search}%")
-    q = q.range(offset, offset + limit - 1)
-    res = q.execute()
-    return res.data or []
+        # búsqueda básica en varias columnas
+        q = q.ilike("asignacion", f"%{search}%")  # seed
+        # NOTA: el cliente supabase-py no permite múltiples ilike encadenados como OR.
+        # Hacemos una aproximación: intentamos por asignación primero; si viene vacío, probamos otras columnas.
+        res = q.range(offset, offset + limit - 1).execute()
+        data = res.data or []
+        if not data:
+            for col in ["guia", "orden_meli", "pack_id", "titulo"]:
+                res = supabase.table(TABLE_NAME).select("*").ilike(col, f"%{search}%").order("id", desc=True).range(offset, offset + limit - 1).execute()
+                if res.data:
+                    data = res.data
+                    break
+        return data
+    else:
+        res = q.range(offset, offset + limit - 1).execute()
+        return res.data or []
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
-    clauses = []
-    if asignacion: clauses.append(f"asignacion.eq.{asignacion}")
-    if orden_meli: clauses.append(f"orden_meli.eq.{orden_meli}")
-    if pack_id:    clauses.append(f"pack_id.eq.{pack_id}")
-    if not clauses:
-        return []
-    res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo") \
-        .or_(",".join(clauses)).limit(50).execute()
-    return res.data or []
+    """Sin usar .or_(): hacemos hasta 3 consultas y unimos resultados por id."""
+    seen = {}
+    if asignacion:
+        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("asignacion", asignacion).limit(50).execute()
+        for r in (res.data or []):
+            seen[r["id"]] = r
+    if orden_meli:
+        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("orden_meli", orden_meli).limit(50).execute()
+        for r in (res.data or []):
+            seen[r["id"]] = r
+    if pack_id:
+        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("pack_id", pack_id).limit(50).execute()
+        for r in (res.data or []):
+            seen[r["id"]] = r
+    return list(seen.values())
 
 def datos_insert(payload: dict):
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
@@ -334,22 +352,22 @@ if st.session_state.page in ("ingresar", "imprimir"):
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# PÁGINA DATOS (con ButtonColumn o CheckboxColumn)
+# PÁGINA DATOS (editar en primera columna + 'Solo sin guía' pegado a la tabla)
 # ==============================
 if st.session_state.page == "datos":
-    st.markdown("<div style='background:#F2F4F4;padding:10px;border-radius:8px;'><h3>Base de datos</h3></div>", unsafe_allow_html=True)
+    st.markdown("### Base de datos")
 
-    colf1, colf2, colf3, colf4 = st.columns([2,1,1,1])
+    # Controles superiores (sin 'Solo sin guía' aquí)
+    colf1, colf2, colf4 = st.columns([2,1,1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
     with colf2:
         page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
-    with colf3:
-        solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     with colf4:
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
+    # Paginación
     colp1, colp2, colp3 = st.columns([1,1,6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
@@ -358,9 +376,12 @@ if st.session_state.page == "datos":
         if st.button("Siguiente ⟶"):
             st.session_state.datos_offset += page_size
 
+    # Datos
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
+    # 'Solo sin guía' pegado a la tabla (debajo de los controles)
+    solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
 
@@ -370,27 +391,31 @@ if st.session_state.page == "datos":
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
         df_all = df_all.copy()
 
+        # Columna 'Editar' como PRIMERA columna
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
+        df_all["Editar"] = False
         if has_button_col:
-            df_all["Editar"] = False
             column_config = {
                 "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
             }
         else:
-            df_all["Editar"] = False
             column_config = {
                 "Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)
             }
 
+        # Reordenamos: primero Editar, luego el resto
+        ordered_cols = ["Editar"] + show_cols
+
         edited_df = st.data_editor(
-            df_all[show_cols + ["Editar"]],
+            df_all[ordered_cols],
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            disabled=show_cols,
+            disabled=show_cols,          # datos bloqueados; solo el botón/checkbox es editable
             column_config=column_config
         )
 
+        # Detectar click/selección en 'Editar'
         try:
             if "Editar" in edited_df.columns and edited_df["Editar"].any():
                 idx = edited_df.index[edited_df["Editar"]].tolist()[0]
@@ -400,6 +425,7 @@ if st.session_state.page == "datos":
         except Exception:
             pass
 
+    # Modal si corresponde
     render_modal_if_needed()
 
 
