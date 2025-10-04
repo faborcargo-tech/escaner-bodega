@@ -4,7 +4,6 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import pytz
 import time
-import io
 
 # ==============================
 # CONFIG
@@ -20,72 +19,78 @@ STORAGE_BUCKET = "etiquetas"  # PDFs de etiquetas
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# STORAGE (PDFs)  — compatible con distintas versiones del SDK
+# STORAGE HELPERS (PDF)
 # ==============================
-def ensure_storage_bucket():
-    """Crea el bucket si no existe. Soporta SDKs sin 'public'."""
+def ensure_storage_bucket() -> bool:
+    """
+    Verifica que el bucket exista. Con anon key NO lo crea.
+    Muestra un mensaje claro si falta.
+    """
     try:
         buckets = supabase.storage.list_buckets()
-        if any(b.get("name") == STORAGE_BUCKET for b in buckets):
-            return
-        # intentar con 'public=True'
-        try:
-            supabase.storage.create_bucket(STORAGE_BUCKET, public=True)
-        except TypeError:
-            # SDK sin parámetro 'public'
-            supabase.storage.create_bucket(STORAGE_BUCKET)
-    except Exception as e:
-        # No es fatal; podemos continuar usando el bucket si ya existe
-        st.warning(f"⚠️ No se pudo verificar/crear bucket '{STORAGE_BUCKET}': {e}")
+        names = [b.get("name") for b in buckets]
+        if STORAGE_BUCKET not in names:
+            st.error(
+                f"El bucket '{STORAGE_BUCKET}' no existe. "
+                f"Créalo en Supabase → Storage (público) y agrega las policies de SELECT/INSERT/UPDATE."
+            )
+            return False
+        return True
+    except Exception:
+        # Si el SDK no soporta list_buckets dejamos continuar
+        return True
 
 def _get_public_or_signed_url(path: str) -> str | None:
-    """Intenta URL pública; si falla, crea URL firmada por 30 días."""
+    """Intenta devolver URL pública; si no, una firmada (30 días)."""
     try:
-        public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
-        # algunos SDK devuelven dict, otros string
-        if isinstance(public_url, dict):
-            public_url = public_url.get("publicUrl") or public_url.get("public_url")
-        if public_url:
-            return public_url
+        url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
+        if isinstance(url, dict):
+            url = url.get("publicUrl") or url.get("public_url") or url.get("publicURL")
+        if url:
+            return url
     except Exception:
         pass
-    # Firmada (30 días)
     try:
-        # algunos SDK usan .create_signed_url(path, expires_in)
         signed = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(path, 60 * 60 * 24 * 30)
         if isinstance(signed, dict):
-            return signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
+            return signed.get("signedUrl") or signed.get("signedURL") or signed.get("signed_url")
         return signed
     except Exception as e:
-        st.error(f"❌ No se pudo generar URL para el PDF: {e}")
+        st.error(f"❌ No se pudo generar URL del PDF: {e}")
         return None
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
     Sube el PDF como <asignacion>.pdf al bucket y devuelve URL.
-    Soporta SDK que exige argumentos posicionales en upload().
+    Sube bytes reales y especifica 'application/pdf'. Reemplaza si existe.
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
         return None
+    if uploaded_file is None:
+        return None
+    if not ensure_storage_bucket():
+        return None
 
+    key_path = f"{asignacion}.pdf"
     try:
-        ensure_storage_bucket()
-        key_path = f"{asignacion}.pdf"
-        # bytes del archivo
-        data = uploaded_file.read()
-        # algunas versiones exigen posicional (path, bytes)
+        file_bytes = uploaded_file.read()  # bytes reales del uploader
+
+        # 1) Intento con firma típica (algunos SDKs aceptan kwargs)
         try:
-            supabase.storage.from_(STORAGE_BUCKET).upload(key_path, data)
+            supabase.storage.from_(STORAGE_BUCKET).upload(
+                path=key_path,
+                file=file_bytes,
+                file_options={"content-type": "application/pdf"},
+                upsert=True,
+            )
         except TypeError:
-            # otras versiones aceptan keywords (file=, path=) pero en orden
-            supabase.storage.from_(STORAGE_BUCKET).upload(path=key_path, file=data)
-        except Exception as e:
-            # intentar con upsert mediante update si ya existe
+            # 2) SDK antiguo: exige posicionales y no soporta 'upsert'
             try:
-                supabase.storage.from_(STORAGE_BUCKET).update(key_path, data)
+                supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
             except Exception:
-                raise e
+                # 3) Si ya existe, lo reemplazamos con update()
+                supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_bytes)
 
         return _get_public_or_signed_url(key_path)
     except Exception as e:
@@ -93,7 +98,7 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
         return None
 
 # ==============================
-# FUNCIONES BASE DE DATOS (EXISTENTES)
+# DB HELPERS (EXISTENTES)
 # ==============================
 def lookup_by_guia(guia: str):
     response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -142,7 +147,7 @@ def get_logs(page: str):
     return response.data if response.data else []
 
 # ==============================
-# FUNCION PRINCIPAL DE ESCANEO
+# ESCANEO
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -155,7 +160,7 @@ def process_scan(guia: str):
             archivo = match.get("archivo_adjunto", "")
             asignacion = match.get("asignacion", "etiqueta")
             if archivo:
-                st.success("Etiqueta disponible, descargando...")
+                st.success("Etiqueta disponible, descargando…")
                 js = f"""
                 var a=document.createElement('a');
                 a.href='{archivo}';
@@ -170,7 +175,7 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
 
 # ==============================
-# HELPERS PARA SECCIÓN DATOS
+# DATOS (CRUD)
 # ==============================
 ALL_COLUMNS = [
     "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
@@ -205,8 +210,8 @@ def datos_defaults():
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        q = q.ilike("asignacion", f"%{search}%")
-        res = q.range(offset, offset + limit - 1).execute()
+        # búsqueda secuencial simple (equivalente a OR)
+        res = q.ilike("asignacion", f"%{search}%").range(offset, offset + limit - 1).execute()
         data = res.data or []
         if not data:
             for col in ["guia", "orden_meli", "pack_id", "titulo"]:
@@ -216,8 +221,7 @@ def datos_fetch(limit=200, offset=0, search:str=""):
                     break
         return data
     else:
-        res = q.range(offset, offset + limit - 1).execute()
-        return res.data or []
+        return q.range(offset, offset + limit - 1).execute().data or []
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
     seen = {}
@@ -242,7 +246,7 @@ def datos_update(id_val: int, payload: dict):
         return None
     return supabase.table(TABLE_NAME).update(clean).eq("id", id_val).execute()
 
-# ======== UI STATE MODAL ========
+# ----------------- UI STATE MODAL -----------------
 if "datos_modal_open" not in st.session_state:
     st.session_state.datos_modal_open = False
 if "datos_modal_mode" not in st.session_state:
@@ -292,7 +296,7 @@ def _render_form_contents():
     data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
     data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
 
-    # Si ya hay archivo, mostrar botón descarga
+    # Si ya hay PDF, botón de descarga
     current_pdf = data.get("archivo_adjunto") or ""
     if current_pdf:
         st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
@@ -302,7 +306,7 @@ def _render_form_contents():
     data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
     data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
 
-    # === NUEVO: subir/reemplazar PDF
+    # Subir/reemplazar PDF
     st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
     pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
 
@@ -315,7 +319,7 @@ def _render_form_contents():
         st.rerun()
 
     if submitted:
-        # Si hay PDF adjunto, lo subimos primero y actualizamos campo
+        # Si hay PDF adjunto, subir antes y setear URL
         if pdf_file is not None:
             asign = (data.get("asignacion") or "").strip()
             if not asign:
@@ -364,7 +368,7 @@ def render_modal_if_needed():
             _render_form_contents()
 
 # ==============================
-# UI (NAV, COLORES, TITULOS)
+# UI (NAV & COLORES)
 # ==============================
 if "page" not in st.session_state:
     st.session_state.page = "ingresar"
@@ -397,7 +401,7 @@ st.header(
 )
 
 # ==============================
-# ESCANEO
+# ESCANEO (ingresar / imprimir)
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     auto_scan = st.checkbox("Escaneo automático", value=False)
@@ -413,7 +417,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
                 st.session_state.last_time = now_t
 
 # ==============================
-# TABLA LOG
+# LOG DE ESCANEOS (ingresar / imprimir)
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     st.subheader("Registro de escaneos (últimos 60 días)")
@@ -440,7 +444,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# PÁGINA DATOS (editar 1ª columna + 'Solo sin guía' abajo)
+# PÁGINA DATOS
 # ==============================
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
@@ -465,6 +469,7 @@ if st.session_state.page == "datos":
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
+    # Filtro rápido pegado a la tabla
     solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
@@ -475,6 +480,7 @@ if st.session_state.page == "datos":
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
         df_all = df_all.copy()
 
+        # Columna 'Editar' como primera
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
         df_all["Editar"] = False
         if has_button_col:
@@ -503,5 +509,6 @@ if st.session_state.page == "datos":
             pass
 
     render_modal_if_needed()
+
 
 
