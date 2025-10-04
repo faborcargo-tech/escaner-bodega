@@ -8,6 +8,8 @@ import time
 # ==============================
 # CONFIG
 # ==============================
+st.set_page_config(page_title="Escáner Bodega", layout="wide")
+
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -16,7 +18,7 @@ TABLE_NAME = "paquetes_mercadoenvios_chile"
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# FUNCIONES BASE DE DATOS
+# FUNCIONES BASE DE DATOS (EXISTENTES)
 # ==============================
 def lookup_by_guia(guia: str):
     response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -68,7 +70,7 @@ def get_logs(page: str):
     return response.data if response.data else []
 
 # ==============================
-# FUNCION PRINCIPAL DE ESCANEO
+# FUNCION PRINCIPAL DE ESCANEO (EXISTENTE)
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -92,9 +94,8 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
 
 # ==============================
-# NUEVO: HELPERS PARA SECCIÓN DATOS
+# NUEVO: HELPERS PARA SECCIÓN DATOS (MODAL + CRUD)
 # ==============================
-# No rompe nada existente; usa la misma tabla y cliente.
 ALL_COLUMNS = [
     "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
     "asin", "cantidad", "estado_orden", "estado_envio",
@@ -102,9 +103,9 @@ ALL_COLUMNS = [
     "fecha_impresion", "titulo", "orden_meli", "pack_id"
 ]
 REQUIRED_FIELDS = ["asignacion", "orden_meli"]
-LOCKED_FIELDS   = ["asignacion", "orden_meli", "pack_id"]  # no editables
+LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]  # bloqueadas SOLO en edición
 
-def datos_column_defaults():
+def datos_defaults():
     return dict(
         id=None,
         asignacion="",
@@ -125,31 +126,16 @@ def datos_column_defaults():
         pack_id=""
     )
 
-def datos_get_all_rows(limit=5000):
-    return supabase.table(TABLE_NAME).select("*").order("id", desc=True).limit(limit).execute()
-
-def datos_insert_row(payload: dict):
-    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
-    return supabase.table(TABLE_NAME).insert(clean).execute()
-
-def datos_update_rows_bulk(rows_to_update):
-    """Actualiza por id; ignora columnas bloqueadas y 'id'."""
-    errors = []
-    for row in rows_to_update:
-        rid = row.get("id")
-        if not rid:
-            continue
-        upd = {k: v for k, v in row.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS + ["id"])}
-        if not upd:
-            continue
-        try:
-            supabase.table(TABLE_NAME).update(upd).eq("id", rid).execute()
-        except Exception as e:
-            errors.append((rid, str(e)))
-    return errors
+def datos_fetch(limit=200, offset=0, search:str=""):
+    q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
+    if search:
+        # Búsqueda simple por asignacion/guia/orden_meli/pack_id/titulo
+        q = q.or_(f"asignacion.ilike.%{search}%,guia.ilike.%{search}%,orden_meli.ilike.%{search}%,pack_id.ilike.%{search}%,titulo.ilike.%{search}%")
+    q = q.range(offset, offset + limit - 1)
+    res = q.execute()
+    return res.data or []
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
-    """Devuelve filas que coinciden por asignacion OR orden_meli OR pack_id."""
     clauses = []
     if asignacion: clauses.append(f"asignacion.eq.{asignacion}")
     if orden_meli: clauses.append(f"orden_meli.eq.{orden_meli}")
@@ -160,11 +146,127 @@ def datos_find_duplicates(asignacion, orden_meli, pack_id):
         .or_(",".join(clauses)).limit(50).execute()
     return res.data or []
 
-# ==============================
-# UI
-# ==============================
-st.set_page_config(page_title="Escáner Bodega", layout="wide")
+def datos_insert(payload: dict):
+    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
+    return supabase.table(TABLE_NAME).insert(clean).execute()
 
+def datos_update(id_val: int, payload: dict):
+    # En edición, nunca aceptamos cambios en LOCKED_FIELDS_EDIT
+    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
+    if not clean:
+        return None
+    return supabase.table(TABLE_NAME).update(clean).eq("id", id_val).execute()
+
+# ======== UI STATE para modal ========
+if "datos_modal_open" not in st.session_state:
+    st.session_state.datos_modal_open = False
+if "datos_modal_mode" not in st.session_state:
+    st.session_state.datos_modal_mode = "new"  # "new" | "edit"
+if "datos_modal_row" not in st.session_state:
+    st.session_state.datos_modal_row = datos_defaults()
+
+def open_modal_new():
+    st.session_state.datos_modal_mode = "new"
+    st.session_state.datos_modal_row = datos_defaults()
+    st.session_state.datos_modal_open = True
+
+def open_modal_edit(row: dict):
+    st.session_state.datos_modal_mode = "edit"
+    # Prepara row con todas las llaves esperadas
+    base = datos_defaults()
+    base.update({k: row.get(k) for k in row.keys()})
+    st.session_state.datos_modal_row = base
+    st.session_state.datos_modal_open = True
+
+def close_modal():
+    st.session_state.datos_modal_open = False
+
+# ======== Modal (con fallback si la versión de Streamlit no lo soporta) ========
+def _render_form_contents():
+    mode = st.session_state.datos_modal_mode
+    data = st.session_state.datos_modal_row.copy()
+
+    st.write("**Modo:** ", "Crear nuevo" if mode == "new" else f"Editar ID {data.get('id')}")
+    colA, colB, colC = st.columns(3)
+
+    # asignacion / orden_meli bloqueados solo en edición
+    if mode == "edit":
+        data["asignacion"] = colA.text_input("asignacion", value=data.get("asignacion") or "", disabled=True)
+        data["orden_meli"] = colB.text_input("orden_meli", value=data.get("orden_meli") or "", disabled=True)
+    else:
+        data["asignacion"] = colA.text_input("asignacion *", value=data.get("asignacion") or "")
+        data["orden_meli"] = colB.text_input("orden_meli *", value=data.get("orden_meli") or "")
+    data["pack_id"] = colC.text_input("pack_id (opcional)", value=(data.get("pack_id") or ""))
+
+    col1, col2, col3 = st.columns(3)
+    data["guia"]   = col1.text_input("guia", value=(data.get("guia") or ""))
+    data["titulo"] = col2.text_input("titulo", value=(data.get("titulo") or ""))
+    data["asin"]   = col3.text_input("asin", value=(data.get("asin") or ""))
+
+    col4, col5, col6 = st.columns(3)
+    data["cantidad"]     = col4.number_input("cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1)
+    data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
+    data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
+
+    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=(data.get("archivo_adjunto") or ""))
+    data["url_imagen"]      = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
+    data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
+    data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
+
+    col_btn1, col_btn2 = st.columns([1,1])
+    submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
+    cancel    = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
+
+    if cancel:
+        close_modal()
+        st.experimental_rerun()
+
+    if submitted:
+        if st.session_state.datos_modal_mode == "new":
+            # validar requeridos
+            missing = [f for f in REQUIRED_FIELDS if not str(data.get(f, "")).strip()]
+            if missing:
+                st.error(f"Faltan campos obligatorios: {', '.join(missing)}")
+                return
+            # duplicados
+            dups = datos_find_duplicates(data["asignacion"].strip(), data["orden_meli"].strip(), (data.get("pack_id") or "").strip())
+            if dups:
+                st.warning("⚠️ Existen registros coincidentes por asignacion / orden_meli / pack_id:")
+                st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
+                if st.checkbox("Forzar inserción a pesar de duplicados", key="force_insert"):
+                    datos_insert(data)
+                    st.success("Registro insertado (forzado).")
+                    close_modal()
+                    st.experimental_rerun()
+            else:
+                datos_insert(data)
+                st.success("Registro insertado correctamente.")
+                close_modal()
+                st.experimental_rerun()
+        else:
+            # edición: nunca tocamos asignacion/orden_meli
+            rid = int(data["id"])
+            datos_update(rid, data)
+            st.success(f"Registro {rid} actualizado.")
+            close_modal()
+            st.experimental_rerun()
+
+# wrapper modal: usa st.dialog si existe; fallback a expander
+def render_modal_if_needed():
+    if not st.session_state.datos_modal_open:
+        return
+    if hasattr(st, "dialog"):
+        @st.dialog("Formulario de registro")
+        def _show_dialog():
+            _render_form_contents()
+        _show_dialog()
+    else:
+        with st.expander("Formulario de registro (vista emergente)", expanded=True):
+            _render_form_contents()
+
+# ==============================
+# UI (NAV, COLORES, TITULOS)
+# ==============================
 if "page" not in st.session_state:
     st.session_state.page = "ingresar"
 if "last_input" not in st.session_state:
@@ -172,7 +274,7 @@ if "last_input" not in st.session_state:
 if "last_time" not in st.session_state:
     st.session_state.last_time = time.time()
 
-# Barra de navegación (se agrega botón DATOS)
+# Barra de navegación
 col1, col2, col3 = st.columns([1,1,1])
 with col1:
     if st.button("INGRESAR PAQUETES"):
@@ -184,12 +286,12 @@ with col3:
     if st.button("🗃️ DATOS"):
         st.session_state.page = "datos"
 
-# Fondo según página (se agrega color para DATOS)
+# Fondo según página
 if st.session_state.page == "ingresar":
     st.markdown("<style>.stApp{background-color: #71A9D9;}</style>", unsafe_allow_html=True)
 elif st.session_state.page == "imprimir":
     st.markdown("<style>.stApp{background-color: #71D999;}</style>", unsafe_allow_html=True)
-else:  # datos
+else:
     st.markdown("<style>.stApp{background-color: #F2F4F4;}</style>", unsafe_allow_html=True)
 
 # Título
@@ -199,20 +301,13 @@ st.header(
 )
 
 # ==============================
-# ESCANEO (se mantiene igual y sólo se ejecuta en ingresar/imprimir)
+# ESCANEO (solo ingresar/imprimir)
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
-    # Checkbox automático (desactivado por defecto)
     auto_scan = st.checkbox("Escaneo automático", value=False)
-
-    # Input de escaneo
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)", key="scan_input")
-
-    # Procesar manual
     if st.button("Procesar escaneo"):
         process_scan(scan_val.strip())
-
-    # Escaneo automático
     if auto_scan:
         if scan_val != st.session_state.last_input and len(scan_val.strip()) > 8:
             now_t = time.time()
@@ -222,20 +317,17 @@ if st.session_state.page in ("ingresar", "imprimir"):
                 st.session_state.last_time = now_t
 
 # ==============================
-# TABLA LOG DIRECTO DE SUPABASE (solo para ingresar/imprimir)
+# TABLA LOG (solo ingresar/imprimir)
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     st.subheader("Registro de escaneos (últimos 60 días)")
     rows = get_logs(st.session_state.page)
     df = pd.DataFrame(rows)
 
-    # Columnas visibles
     visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
                     "estado_orden", "estado_envio", "archivo_adjunto", "comentario", "titulo", "asin"]
-
     df = df[[c for c in visible_cols if c in df.columns]]
 
-    # Botón en columna archivo_adjunto
     if "archivo_adjunto" in df.columns:
         def make_button(url):
             if url:
@@ -243,121 +335,62 @@ if st.session_state.page in ("ingresar", "imprimir"):
             return "No disponible"
         df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
 
-    # Mostrar tabla
     if not df.empty:
         st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
     else:
         st.info("No hay registros aún.")
 
-    # Export CSV
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# NUEVO: SECCIÓN DATOS (formulario + editor)
+# NUEVO: PÁGINA DATOS
 # ==============================
 if st.session_state.page == "datos":
-    st.markdown("<div style='background:#F2F4F4;padding:10px;border-radius:8px;'><h3>Ingreso manual y edición de datos</h3></div>", unsafe_allow_html=True)
+    st.markdown("<div style='background:#F2F4F4;padding:10px;border-radius:8px;'><h3>Base de datos</h3></div>", unsafe_allow_html=True)
 
-    # ---------- Formulario de alta manual ----------
-    st.subheader("Ingresar registro manual")
-    with st.form("form_datos_manual"):
-        c = datos_column_defaults()
+    # ---- Controles de tabla ----
+    colf1, colf2, colf3 = st.columns([2,1,1])
+    with colf1:
+        search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
+    with colf2:
+        page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
+    with colf3:
+        if st.button("➕ Nuevo registro", use_container_width=True):
+            open_modal_new()
 
-        colA, colB, colC = st.columns(3)
-        c["asignacion"] = colA.text_input("asignacion *", value=c["asignacion"])
-        c["orden_meli"] = colB.text_input("orden_meli *", value=c["orden_meli"])
-        c["pack_id"]    = colC.text_input("pack_id (opcional)", value=c["pack_id"])
+    # Paginación simple
+    if "datos_offset" not in st.session_state:
+        st.session_state.datos_offset = 0
+    colp1, colp2, colp3 = st.columns([1,1,6])
+    with colp1:
+        if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
+            st.session_state.datos_offset -= page_size
+    with colp2:
+        if st.button("Siguiente ⟶"):
+            st.session_state.datos_offset += page_size
 
-        col1, col2, col3 = st.columns(3)
-        c["guia"]   = col1.text_input("guia", value=c["guia"])
-        c["titulo"] = col2.text_input("titulo", value=c["titulo"])
-        c["asin"]   = col3.text_input("asin", value=c["asin"])
-
-        col4, col5, col6 = st.columns(3)
-        c["cantidad"]     = col4.number_input("cantidad", value=int(c["cantidad"]), min_value=0, step=1)
-        c["estado_orden"] = col5.text_input("estado_orden", value=c["estado_orden"])
-        c["estado_envio"] = col6.text_input("estado_envio", value=c["estado_envio"])
-
-        c["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=c["archivo_adjunto"])
-        c["url_imagen"]      = st.text_input("url_imagen (URL)", value=c["url_imagen"])
-        c["comentario"]      = st.text_area("comentario", value=c["comentario"])
-        c["descripcion"]     = st.text_area("descripcion", value=c["descripcion"])
-
-        submitted = st.form_submit_button("➕ Guardar registro")
-
-    if submitted:
-        missing = [f for f in REQUIRED_FIELDS if not str(c.get(f, "")).strip()]
-        if missing:
-            st.error(f"Faltan campos obligatorios: {', '.join(missing)}")
-        else:
-            dups = datos_find_duplicates(c["asignacion"].strip(), c["orden_meli"].strip(), (c["pack_id"] or "").strip())
-            if dups:
-                st.warning("⚠️ Ya existen registros que coinciden por asignacion / orden_meli / pack_id:")
-                st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
-                if st.checkbox("Forzar inserción a pesar de duplicados"):
-                    try:
-                        datos_insert_row(c)
-                        st.success("Registro insertado (forzado).")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error insertando: {e}")
-            else:
-                try:
-                    datos_insert_row(c)
-                    st.success("Registro insertado.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error insertando: {e}")
-
-    st.divider()
-
-    # ---------- Editor de base (bloqueando 3 columnas) ----------
-    st.subheader("Editar base de datos (bloqueado: asignacion, orden_meli, pack_id)")
-
-    res_all = datos_get_all_rows()
-    df_all = pd.DataFrame(res_all.data) if res_all and res_all.data else pd.DataFrame()
+    # Trae datos
+    data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
+    df_all = pd.DataFrame(data_rows)
 
     if df_all.empty:
-        st.info("No hay registros.")
+        st.info("Sin registros para mostrar.")
     else:
+        # Mostrar tabla de datos
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
-        df_all = df_all[show_cols]
+        st.dataframe(df_all[show_cols], use_container_width=True, hide_index=True)
 
-        edited_df = st.data_editor(
-            df_all,
-            use_container_width=True,
-            hide_index=True,
-            disabled=LOCKED_FIELDS,   # ← bloquea esas columnas
-            num_rows="fixed"          # no permite agregar filas desde la grilla
-        )
+        # Botones de edición por fila (para las filas visibles)
+        st.subheader("Acciones por fila")
+        for _, row in df_all.iterrows():
+            with st.container():
+                c1, c2, c3, c4 = st.columns([6,1,1,1])
+                c1.caption(f"ID {row['id']} · asignacion: {row.get('asignacion','')} · orden_meli: {row.get('orden_meli','')}")
+                if c2.button("✏️ Editar", key=f"edit_{row['id']}"):
+                    open_modal_edit(row.to_dict())
+                # podrías agregar más acciones aquí si lo necesitas
+        st.caption("Tip: Usa el buscador para filtrar y luego edita la fila que necesites.")
 
-        if st.button("💾 Guardar cambios"):
-            diffs = []
-            for i in range(len(df_all)):
-                before = df_all.iloc[i].to_dict()
-                after  = edited_df.iloc[i].to_dict()
-                delta = {}
-                for k in show_cols:
-                    if k in LOCKED_FIELDS or k == "id":
-                        continue
-                    b, a = before.get(k), after.get(k)
-                    if (pd.isna(b) and pd.isna(a)) or (b == a):
-                        continue
-                    delta[k] = a
-                if delta:
-                    delta["id"] = int(after["id"])
-                    diffs.append(delta)
-
-            if not diffs:
-                st.info("No hay cambios que guardar.")
-            else:
-                errs = datos_update_rows_bulk(diffs)
-                if errs:
-                    st.error(f"Guardado con {len(errs)} error(es).")
-                    st.write(errs[:10])
-                else:
-                    st.success(f"Cambios guardados en {len(diffs)} fila(s).")
-                    st.rerun()
-
-
+    # Renderiza la ventana emergente si corresponde
+    render_modal_if_needed()
