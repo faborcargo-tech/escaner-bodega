@@ -16,40 +16,78 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TABLE_NAME = "paquetes_mercadoenvios_chile"
-STORAGE_BUCKET = "etiquetas"  # bucket público para PDFs
+STORAGE_BUCKET = "etiquetas"  # PDFs de etiquetas
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# STORAGE (PDFs)
+# STORAGE (PDFs)  — compatible con distintas versiones del SDK
 # ==============================
 def ensure_storage_bucket():
-    """Crea el bucket público si no existe."""
+    """Crea el bucket si no existe. Soporta SDKs sin 'public'."""
     try:
-        buckets = supabase.storage.list_buckets()  # v2 client
-        if not any(b.get("name") == STORAGE_BUCKET for b in buckets):
+        buckets = supabase.storage.list_buckets()
+        if any(b.get("name") == STORAGE_BUCKET for b in buckets):
+            return
+        # intentar con 'public=True'
+        try:
             supabase.storage.create_bucket(STORAGE_BUCKET, public=True)
+        except TypeError:
+            # SDK sin parámetro 'public'
+            supabase.storage.create_bucket(STORAGE_BUCKET)
     except Exception as e:
+        # No es fatal; podemos continuar usando el bucket si ya existe
         st.warning(f"⚠️ No se pudo verificar/crear bucket '{STORAGE_BUCKET}': {e}")
 
-def upload_pdf_to_storage(asignacion: str, file) -> str | None:
+def _get_public_or_signed_url(path: str) -> str | None:
+    """Intenta URL pública; si falla, crea URL firmada por 30 días."""
+    try:
+        public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
+        # algunos SDK devuelven dict, otros string
+        if isinstance(public_url, dict):
+            public_url = public_url.get("publicUrl") or public_url.get("public_url")
+        if public_url:
+            return public_url
+    except Exception:
+        pass
+    # Firmada (30 días)
+    try:
+        # algunos SDK usan .create_signed_url(path, expires_in)
+        signed = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(path, 60 * 60 * 24 * 30)
+        if isinstance(signed, dict):
+            return signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
+        return signed
+    except Exception as e:
+        st.error(f"❌ No se pudo generar URL para el PDF: {e}")
+        return None
+
+def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
-    Sube el PDF al bucket 'etiquetas' con nombre <asignacion>.pdf
-    Devuelve la URL pública o None si falla.
+    Sube el PDF como <asignacion>.pdf al bucket y devuelve URL.
+    Soporta SDK que exige argumentos posicionales en upload().
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
         return None
+
     try:
         ensure_storage_bucket()
-        key_path = f"{asignacion}.pdf"  # guardamos con este nombre para que el navegador use ese filename
-        data = file.getvalue() if hasattr(file, "getvalue") else file.read()
-        supabase.storage.from_(STORAGE_BUCKET).upload(
-            path=key_path,
-            file=io.BytesIO(data),
-            file_options={"content-type": "application/pdf", "upsert": True},
-        )
-        public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
-        return public_url
+        key_path = f"{asignacion}.pdf"
+        # bytes del archivo
+        data = uploaded_file.read()
+        # algunas versiones exigen posicional (path, bytes)
+        try:
+            supabase.storage.from_(STORAGE_BUCKET).upload(key_path, data)
+        except TypeError:
+            # otras versiones aceptan keywords (file=, path=) pero en orden
+            supabase.storage.from_(STORAGE_BUCKET).upload(path=key_path, file=data)
+        except Exception as e:
+            # intentar con upsert mediante update si ya existe
+            try:
+                supabase.storage.from_(STORAGE_BUCKET).update(key_path, data)
+            except Exception:
+                raise e
+
+        return _get_public_or_signed_url(key_path)
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
@@ -96,14 +134,11 @@ def insert_no_coincidente(guia: str):
         st.error(f"❌ Error al insertar NO COINCIDENTE ({guia}): {e}")
 
 def get_logs(page: str):
-    """Obtiene logs de Supabase según la página (ingreso o impresión)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
-
     if page == "ingresar":
         response = supabase.table(TABLE_NAME).select("*").gte("fecha_ingreso", cutoff).order("fecha_ingreso", desc=True).execute()
     else:
         response = supabase.table(TABLE_NAME).select("*").gte("fecha_impresion", cutoff).order("fecha_impresion", desc=True).execute()
-
     return response.data if response.data else []
 
 # ==============================
@@ -111,19 +146,16 @@ def get_logs(page: str):
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
-
     if match:
         if st.session_state.page == "ingresar":
             update_ingreso(guia)
             st.success(f"📦 Guía {guia} ingresada correctamente")
-
         elif st.session_state.page == "imprimir":
             update_impresion(guia)
             archivo = match.get("archivo_adjunto", "")
             asignacion = match.get("asignacion", "etiqueta")
             if archivo:
                 st.success("Etiqueta disponible, descargando...")
-                # Forzar nombre de archivo en la descarga
                 js = f"""
                 var a=document.createElement('a');
                 a.href='{archivo}';
@@ -133,7 +165,6 @@ def process_scan(guia: str):
                 st.components.v1.html(f"<script>{js}</script>", height=0)
             else:
                 st.warning("⚠️ Etiqueta no disponible")
-
     else:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
@@ -174,7 +205,6 @@ def datos_defaults():
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        # búsqueda básica en varias columnas (fallback secuencial)
         q = q.ilike("asignacion", f"%{search}%")
         res = q.range(offset, offset + limit - 1).execute()
         data = res.data or []
@@ -190,20 +220,16 @@ def datos_fetch(limit=200, offset=0, search:str=""):
         return res.data or []
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
-    """Sin .or_(): hacemos hasta 3 consultas y unimos resultados por id."""
     seen = {}
     if asignacion:
         res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("asignacion", asignacion).limit(50).execute()
-        for r in (res.data or []):
-            seen[r["id"]] = r
+        for r in (res.data or []): seen[r["id"]] = r
     if orden_meli:
         res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("orden_meli", orden_meli).limit(50).execute()
-        for r in (res.data or []):
-            seen[r["id"]] = r
+        for r in (res.data or []): seen[r["id"]] = r
     if pack_id:
         res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("pack_id", pack_id).limit(50).execute()
-        for r in (res.data or []):
-            seen[r["id"]] = r
+        for r in (res.data or []): seen[r["id"]] = r
     return list(seen.values())
 
 def datos_insert(payload: dict):
@@ -266,13 +292,19 @@ def _render_form_contents():
     data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
     data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
 
-    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=(data.get("archivo_adjunto") or ""))
+    # Si ya hay archivo, mostrar botón descarga
+    current_pdf = data.get("archivo_adjunto") or ""
+    if current_pdf:
+        st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
+
+    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=current_pdf)
     data["url_imagen"]      = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
     data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
     data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
 
-    # === NUEVO: subir PDF
-    pdf_file = st.file_uploader("Subir etiqueta PDF", type=["pdf"], accept_multiple_files=False)
+    # === NUEVO: subir/reemplazar PDF
+    st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
+    pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
 
     col_btn1, col_btn2 = st.columns([1,1])
     submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
@@ -283,9 +315,8 @@ def _render_form_contents():
         st.rerun()
 
     if submitted:
-        # Si hay PDF adjunto, lo subimos y seteamos archivo_adjunto
+        # Si hay PDF adjunto, lo subimos primero y actualizamos campo
         if pdf_file is not None:
-            # Para crear/editar: usamos el nombre <asignacion>.pdf
             asign = (data.get("asignacion") or "").strip()
             if not asign:
                 st.error("Debes completar 'asignacion' para subir el PDF.")
@@ -409,12 +440,11 @@ if st.session_state.page in ("ingresar", "imprimir"):
     st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 # ==============================
-# PÁGINA DATOS (editar en primera columna + 'Solo sin guía' pegado a la tabla)
+# PÁGINA DATOS (editar 1ª columna + 'Solo sin guía' abajo)
 # ==============================
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
 
-    # Controles superiores
     colf1, colf2, colf4 = st.columns([2,1,1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
@@ -424,7 +454,6 @@ if st.session_state.page == "datos":
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
-    # Paginación
     colp1, colp2, colp3 = st.columns([1,1,6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
@@ -433,11 +462,9 @@ if st.session_state.page == "datos":
         if st.button("Siguiente ⟶"):
             st.session_state.datos_offset += page_size
 
-    # Datos
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
-    # 'Solo sin guía' pegado a la tabla
     solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
@@ -448,17 +475,12 @@ if st.session_state.page == "datos":
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
         df_all = df_all.copy()
 
-        # Columna 'Editar' como PRIMERA columna
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
         df_all["Editar"] = False
         if has_button_col:
-            column_config = {
-                "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
-            }
+            column_config = {"Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")}
         else:
-            column_config = {
-                "Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)
-            }
+            column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)}
 
         ordered_cols = ["Editar"] + show_cols
 
@@ -467,7 +489,7 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            disabled=show_cols,          # datos bloqueados; solo el botón/checkbox es editable
+            disabled=show_cols,
             column_config=column_config
         )
 
@@ -480,7 +502,6 @@ if st.session_state.page == "datos":
         except Exception:
             pass
 
-    # Modal si corresponde
     render_modal_if_needed()
 
 
