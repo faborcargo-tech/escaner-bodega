@@ -166,29 +166,52 @@ def get_logs(page: str):
 # ESCANEO
 # ==============================
 def process_scan(guia: str):
+    """
+    Busca la guía en la tabla.
+    - En modo INGRESAR: marca ingreso.
+    - En modo IMPRIMIR: marca fecha_impresion, descarga el PDF si existe.
+    """
     match = lookup_by_guia(guia)
-    if match:
-        if st.session_state.page == "ingresar":
-            update_ingreso(guia)
-            st.success(f"📦 Guía {guia} ingresada correctamente")
-        elif st.session_state.page == "imprimir":
-            update_impresion(guia)
-            archivo = match.get("archivo_adjunto", "")
-            asignacion = match.get("asignacion", "etiqueta")
-            if archivo:
-                st.success("Etiqueta disponible, descargando…")
-                js = f"""
-                var a=document.createElement('a');
-                a.href='{archivo}';
-                a.download='{asignacion}.pdf';
-                document.body.appendChild(a);a.click();a.remove();
-                """
-                st.components.v1.html(f"<script>{js}</script>", height=0)
-            else:
-                st.warning("⚠️ Etiqueta no disponible")
-    else:
+    if not match:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
+        return
+
+    if st.session_state.page == "ingresar":
+        update_ingreso(guia)
+        st.success(f"📦 Guía {guia} ingresada correctamente")
+
+    elif st.session_state.page == "imprimir":
+        update_impresion(guia)
+        archivo = match.get("archivo_adjunto", "")
+        asignacion = match.get("asignacion", "etiqueta")
+        if archivo:
+            st.success("Etiqueta disponible, descargando…")
+
+            # 🧩 Inyectar JS que fuerza la descarga real del PDF
+            js = f"""
+            <script>
+            var a = document.createElement('a');
+            a.href = '{archivo}';
+            a.download = '{asignacion}.pdf';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            </script>
+            """
+            st.components.v1.html(js, height=0)
+
+            # Mostrar botón adicional para volver a descargar si se desea
+            st.download_button(
+                label=f"📄 Descargar nuevamente {asignacion}.pdf",
+                data=requests.get(archivo).content,
+                file_name=f"{asignacion}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
 # ==============================
 # DATOS (CRUD)
