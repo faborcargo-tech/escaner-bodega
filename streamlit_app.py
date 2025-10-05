@@ -63,41 +63,29 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
-    Sube el PDF como <asignacion>.pdf al bucket y devuelve URL.
-    Sube bytes reales y especifica 'application/pdf'. Reemplaza si existe.
+    Sube el PDF como <asignacion>.pdf al bucket y devuelve URL pública.
+    Corrige el content-type para evitar PDFs corruptos.
     """
-    if not asignacion:
-        st.error("La asignación es requerida para subir el PDF.")
-        return None
-    if uploaded_file is None:
-        return None
-    if not ensure_storage_bucket():
+    if not asignacion or uploaded_file is None:
         return None
 
     key_path = f"{asignacion}.pdf"
+    file_bytes = uploaded_file.read()
+
     try:
-        file_bytes = uploaded_file.read()  # bytes reales del uploader
+        # Forzamos el tipo MIME correcto
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            path=key_path,
+            file=file_bytes,
+            file_options={"contentType": "application/pdf", "upsert": "true"},
+        )
+    except Exception:
+        # Fallback si el SDK no acepta file_options
+        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
 
-        # 1) Intento con firma típica (algunos SDKs aceptan kwargs)
-        try:
-            supabase.storage.from_(STORAGE_BUCKET).upload(
-                path=key_path,
-                file=file_bytes,
-                file_options={"content-type": "application/pdf"},
-                upsert=True,
-            )
-        except TypeError:
-            # 2) SDK antiguo: exige posicionales y no soporta 'upsert'
-            try:
-                supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
-            except Exception:
-                # 3) Si ya existe, lo reemplazamos con update()
-                supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_bytes)
+    # Recuperar URL pública
+    return supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
 
-        return _get_public_or_signed_url(key_path)
-    except Exception as e:
-        st.error(f"❌ Error subiendo PDF: {e}")
-        return None
 
 # ==============================
 # DB HELPERS (EXISTENTES)
