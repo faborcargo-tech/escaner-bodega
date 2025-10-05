@@ -140,59 +140,68 @@ def get_logs(page: str):
 
 
 # ==============================
-# PROCESAR ESCANEO
+# PROCESAR ESCANEO (ROBUSTO)
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
+    now = datetime.now(TZ)
+
     if not match:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
+        st.rerun()
         return
 
-    # ==========================
+    asignacion = (match.get("asignacion") or "etiqueta").strip()
+    archivo_public = match.get("archivo_adjunto") or ""
+
+    # ---------------------------
     # MODO INGRESAR
-    # ==========================
+    # ---------------------------
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
+        st.rerun()
         return
 
-    # ==========================
+    # ---------------------------
     # MODO IMPRIMIR
-    # ==========================
+    # ---------------------------
     if st.session_state.page == "imprimir":
         update_impresion(guia)
-        archivo_public = match.get("archivo_adjunto") or ""
-        asignacion = (match.get("asignacion") or "etiqueta").strip()
 
         if archivo_public:
-            download_url = archivo_public  # Usamos el enlace público directamente
-            st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
+            st.info(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
 
-            # ✅ Descarga automática forzada con JavaScript (sin abrir el PDF en navegador)
+            # ✅ Forzar descarga automática (método más compatible)
             js = f"""
             <script>
-            const link = document.createElement('a');
-            link.href = '{download_url}';
-            link.download = '{asignacion}.pdf';
-            link.style.display = 'none';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            function triggerDownload() {{
+                const link = document.createElement('a');
+                link.href = '{archivo_public}';
+                link.setAttribute('download', '{asignacion}.pdf');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }}
+            setTimeout(triggerDownload, 500);
             </script>
             """
             st.components.v1.html(js, height=0)
 
-            # 💾 También guardamos registro visible en log con botón de descarga posterior
-            st.download_button(
-                label=f"📄 Descargar nuevamente {asignacion}.pdf",
-                data=requests.get(download_url).content,
-                file_name=f"{asignacion}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
+            # Registrar también el evento visualmente
+            st.success(f"✅ Descarga iniciada para {asignacion}.pdf")
+
+            # Actualizar registro en base de datos con timestamp
+            supabase.table(TABLE_NAME).update({
+                "fecha_impresion": now.isoformat()
+            }).eq("guia", guia).execute()
+
         else:
             st.warning("⚠️ Etiqueta no disponible para esta guía.")
+
+        # 🔁 Refrescar automáticamente el log después del escaneo
+        st.rerun()
 
 
 # ==============================
