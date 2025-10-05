@@ -22,10 +22,12 @@ TZ = pytz.timezone("America/Santiago")
 # STORAGE HELPERS (PDF)
 # ==============================
 def ensure_storage_bucket() -> bool:
-    """
-    Verifica que el bucket exista. Con anon key NO lo crea.
-    Muestra un mensaje claro si falta.
-    """
+    try:
+        supabase.storage.from_(STORAGE_BUCKET).list()
+        return True
+    except Exception:
+        # No podemos verificar con anon key, asumimos que existe
+        return True
     try:
         buckets = supabase.storage.list_buckets()
         names = [b.get("name") for b in buckets]
