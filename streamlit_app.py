@@ -160,12 +160,24 @@ def process_scan(guia: str):
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
         if archivo_public:
-            download_url = build_download_url(archivo_public, asignacion)
-            st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
-            # Descarga automática invisible
-            st.components.v1.html(f'<iframe src="{download_url}" style="display:none"></iframe>', height=0)
-        else:
-            st.warning("⚠️ Etiqueta no disponible para esta guía.")
+    download_url = build_download_url(archivo_public, asignacion)
+    st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
+
+    # ✅ Descarga real y automática (forzada por JavaScript)
+    js = f"""
+    <script>
+    const link = document.createElement('a');
+    link.href = '{download_url}';
+    link.download = '{asignacion}.pdf';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    </script>
+    """
+    st.components.v1.html(js, height=0)
+else:
+    st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
 
 # ==============================
