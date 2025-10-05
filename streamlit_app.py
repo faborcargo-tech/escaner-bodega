@@ -522,3 +522,31 @@ if st.session_state.page == "datos":
 
     render_modal_if_needed()
 
+def limpiar_adjuntos_invalidos():
+    """
+    Verifica los enlaces en 'archivo_adjunto' y limpia los que ya no existen en el bucket.
+    """
+    st.info("Verificando enlaces de PDFs... esto puede tardar unos segundos.")
+    res = supabase.table(TABLE_NAME).select("id, archivo_adjunto").not_.is_("archivo_adjunto", None).execute()
+    rows = res.data or []
+    total = 0
+    for r in rows:
+        url = r.get("archivo_adjunto")
+        if not url:
+            continue
+        try:
+            head = requests.head(url, timeout=5)
+            if head.status_code == 404:
+                supabase.table(TABLE_NAME).update({"archivo_adjunto": None}).eq("id", r["id"]).execute()
+                total += 1
+        except Exception:
+            continue
+    st.success(f"Se limpiaron {total} enlaces inválidos.")
+
+if st.session_state.page == "datos":
+    st.markdown("### Base de datos")
+    if st.button("🧹 Limpiar adjuntos inválidos"):
+        limpiar_adjuntos_invalidos()
+
+
+
