@@ -49,12 +49,32 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 from typing import Optional
 
+from typing import Optional
+
+import requests
+
+def url_disponible(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        r = requests.head(url, timeout=5)
+        # algunos CDNs devuelven 200 al HEAD y 200/404 al GET; probamos GET si es dudoso
+        if r.status_code == 200:
+            return True
+        if r.status_code == 405:  # HEAD no permitido
+            r = requests.get(url, stream=True, timeout=5)
+            return r.status_code == 200
+        return False
+    except Exception:
+        return False
+
+
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
     """
-    Sube el PDF al bucket 'etiquetas' renombrándolo a <asignacion>.pdf.
-    - Usa BYTES (no BytesIO) porque tu storage3 lo exige.
-    - Reemplaza si ya existe con upsert=True.
-    - Fuerza MIME application/pdf.
+    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas'.
+    - Usa BYTES (no BytesIO).
+    - Fuerza MIME correcto.
+    - Reemplaza si existe con upsert="true" (string).
     - Devuelve URL pública o firmada.
     """
     if not asignacion:
@@ -64,40 +84,26 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
         return None
 
     key_path = f"{asignacion}.pdf"
-    file_bytes = uploaded_file.read()  # 👈 BYTES (no BytesIO)
+    file_bytes = uploaded_file.read()  # ✅ bytes, no BytesIO
 
-    # Intento A: firma típica (upsert como kw separado + contentType en camelCase)
     try:
+        # En tu SDK, pasar upsert como string evita el fallo de headers booleanos
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
             file=file_bytes,
-            file_options={"contentType": "application/pdf"},
-            upsert=True,                             # 👈 reemplazo
+            file_options={"contentType": "application/pdf", "upsert": "true"},
         )
     except TypeError:
-        # Intento B: upsert dentro de file_options (SDK intermedio)
-        try:
-            supabase.storage.from_(STORAGE_BUCKET).upload(
-                path=key_path,
-                file=file_bytes,
-                file_options={"contentType": "application/pdf", "upsert": True},
-            )
-        except TypeError:
-            # Intento C: claves snake_case (SDK más antiguo)
-            try:
-                supabase.storage.from_(STORAGE_BUCKET).upload(
-                    path=key_path,
-                    file=file_bytes,
-                    file_options={"content_type": "application/pdf", "upsert": True},
-                )
-            except Exception as e:
-                st.error(f"❌ Error subiendo PDF: {e}")
-                return None
+        # Variante snake_case por si tu storage3 lo requiere
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            path=key_path,
+            file=file_bytes,
+            file_options={"content_type": "application/pdf", "upsert": "true"},
+        )
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # URL pública o firmada (según bucket)
     return _get_public_or_signed_url(key_path)
 
 
@@ -441,6 +447,14 @@ if st.session_state.page in ("ingresar", "imprimir"):
         f"log_{st.session_state.page}.csv",
         "text/csv"
     )
+
+    if "archivo_adjunto" in df.columns:
+        def make_button(url):
+            if url_disponible(url):
+                return f'<a href="{url}" target="_blank" download><button>Descargar</button></a>'
+            return "No disponible"
+        df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
+
 
 # ==============================
 # PÁGINA DATOS
