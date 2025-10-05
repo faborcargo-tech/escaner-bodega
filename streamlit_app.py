@@ -149,35 +149,50 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
         return
 
+    # ==========================
+    # MODO INGRESAR
+    # ==========================
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
         return
 
+    # ==========================
+    # MODO IMPRIMIR
+    # ==========================
     if st.session_state.page == "imprimir":
         update_impresion(guia)
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
         if archivo_public:
-    download_url = build_download_url(archivo_public, asignacion)
-    st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
+            download_url = archivo_public  # Usamos el enlace público directamente
+            st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
 
-    # ✅ Descarga real y automática (forzada por JavaScript)
-    js = f"""
-    <script>
-    const link = document.createElement('a');
-    link.href = '{download_url}';
-    link.download = '{asignacion}.pdf';
-    link.style.display = 'none';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    </script>
-    """
-    st.components.v1.html(js, height=0)
-else:
-    st.warning("⚠️ Etiqueta no disponible para esta guía.")
+            # ✅ Descarga automática forzada con JavaScript (sin abrir el PDF en navegador)
+            js = f"""
+            <script>
+            const link = document.createElement('a');
+            link.href = '{download_url}';
+            link.download = '{asignacion}.pdf';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            </script>
+            """
+            st.components.v1.html(js, height=0)
+
+            # 💾 También guardamos registro visible en log con botón de descarga posterior
+            st.download_button(
+                label=f"📄 Descargar nuevamente {asignacion}.pdf",
+                data=requests.get(download_url).content,
+                file_name=f"{asignacion}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
 
 # ==============================
