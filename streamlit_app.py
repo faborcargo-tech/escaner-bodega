@@ -63,8 +63,8 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
-    Sube el PDF como <asignacion>.pdf al bucket y devuelve URL pública.
-    Corrige el content-type para evitar PDFs corruptos.
+    Sube el PDF al bucket 'etiquetas' renombrándolo a <asignacion>.pdf.
+    Siempre reemplaza si ya existe y devuelve la URL pública.
     """
     if not asignacion or uploaded_file is None:
         return None
@@ -73,17 +73,20 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     file_bytes = uploaded_file.read()
 
     try:
-        # Forzamos el tipo MIME correcto
+        # Subir con el nombre de la asignación y el tipo MIME correcto
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
             file=file_bytes,
             file_options={"contentType": "application/pdf", "upsert": "true"},
         )
     except Exception:
-        # Fallback si el SDK no acepta file_options
-        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
+        # Fallback para SDKs que no aceptan file_options/upsert
+        try:
+            supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_bytes)
+        except Exception:
+            supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
 
-    # Recuperar URL pública
+    # Generar URL pública del archivo final
     return supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
 
 
