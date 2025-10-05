@@ -140,12 +140,13 @@ def get_logs(page: str):
 
 
 # ==============================
-# PROCESAR ESCANEO (ROBUSTO)
+# PROCESAR ESCANEO (VERSIÓN ESTABLE FINAL)
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
     now = datetime.now(TZ)
 
+    # --- Si no existe ---
     if not match:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
@@ -155,44 +156,34 @@ def process_scan(guia: str):
     asignacion = (match.get("asignacion") or "etiqueta").strip()
     archivo_public = match.get("archivo_adjunto") or ""
 
-    # ---------------------------
-    # MODO INGRESAR
-    # ---------------------------
+    # --- MODO INGRESAR ---
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
         st.rerun()
         return
 
-    # ---------------------------
-    # MODO IMPRIMIR
-    # ---------------------------
+    # --- MODO IMPRIMIR ---
     if st.session_state.page == "imprimir":
         update_impresion(guia)
 
         if archivo_public:
-            st.info(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
+            # ✅ Muestra mensaje y fuerza la descarga sin botones JS bloqueados
+            st.success(f"🖨️ Etiqueta {asignacion} disponible. Descargando automáticamente...")
 
-            # ✅ Forzar descarga automática (método más compatible)
-            js = f"""
-            <script>
-            function triggerDownload() {{
-                const link = document.createElement('a');
-                link.href = '{archivo_public}';
-                link.setAttribute('download', '{asignacion}.pdf');
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-            }}
-            setTimeout(triggerDownload, 500);
-            </script>
-            """
-            st.components.v1.html(js, height=0)
+            # Forzar descarga automática usando meta-refresh (más confiable que JS en Streamlit)
+            st.markdown(
+                f"""
+                <meta http-equiv="refresh" content="0; url={archivo_public}">
+                <p style="color:green;font-weight:bold;">
+                La descarga de <b>{asignacion}.pdf</b> debería comenzar automáticamente.<br>
+                Si no inicia, <a href="{archivo_public}" download>haz clic aquí para descargar manualmente</a>.
+                </p>
+                """,
+                unsafe_allow_html=True,
+            )
 
-            # Registrar también el evento visualmente
-            st.success(f"✅ Descarga iniciada para {asignacion}.pdf")
-
-            # Actualizar registro en base de datos con timestamp
+            # 🔁 Actualiza registro con la hora exacta de impresión
             supabase.table(TABLE_NAME).update({
                 "fecha_impresion": now.isoformat()
             }).eq("guia", guia).execute()
@@ -200,7 +191,7 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
-        # 🔁 Refrescar automáticamente el log después del escaneo
+        # 🔁 Actualiza el log de abajo siempre
         st.rerun()
 
 
