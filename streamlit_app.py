@@ -22,7 +22,6 @@ TZ = pytz.timezone("America/Santiago")
 # ==============================
 # STORAGE HELPERS (PDF)
 # ==============================
-
 def ensure_storage_bucket() -> bool:
     """Evita verificar bucket con anon key (no tiene permisos)."""
     return True
@@ -62,11 +61,8 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     key_path = f"{asignacion}.pdf"
 
     try:
-        # Leer bytes y envolver en stream tipo archivo
         file_bytes = uploaded_file.read()
         file_obj = BytesIO(file_bytes)
-
-        # Intento principal: subir con tipo MIME y upsert habilitado
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
             file=file_obj,
@@ -74,7 +70,6 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
         )
 
     except Exception as e1:
-        # SDKs antiguos pueden no aceptar file_options
         try:
             file_obj.seek(0)
             supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_obj)
@@ -82,12 +77,10 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
             st.error(f"❌ Error subiendo PDF: {e1} / {e2}")
             return None
 
-    # Obtener URL pública o firmada
     return _get_public_or_signed_url(key_path)
 
-
 # ==============================
-# DB HELPERS (EXISTENTES)
+# DB HELPERS
 # ==============================
 def lookup_by_guia(guia: str):
     response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -139,7 +132,6 @@ def get_logs(page: str):
         response = supabase.table(TABLE_NAME).select("*").gte("fecha_impresion", cutoff).order("fecha_impresion", desc=True).execute()
     return response.data if response.data else []
 
-
 # ==============================
 # ESCANEO
 # ==============================
@@ -168,7 +160,6 @@ def process_scan(guia: str):
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
 
-
 # ==============================
 # DATOS (CRUD)
 # ==============================
@@ -183,25 +174,11 @@ LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]
 
 def datos_defaults():
     return dict(
-        id=None,
-        asignacion="",
-        guia="",
-        fecha_ingreso=None,
-        estado_escaneo="",
-        asin="",
-        cantidad=1,
-        estado_orden="",
-        estado_envio="",
-        archivo_adjunto="",
-        url_imagen="",
-        comentario="",
-        descripcion="",
-        fecha_impresion=None,
-        titulo="",
-        orden_meli="",
-        pack_id=""
+        id=None, asignacion="", guia="", fecha_ingreso=None,
+        estado_escaneo="", asin="", cantidad=1, estado_orden="",
+        estado_envio="", archivo_adjunto="", url_imagen="", comentario="",
+        descripcion="", fecha_impresion=None, titulo="", orden_meli="", pack_id=""
     )
-
 
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
@@ -218,25 +195,17 @@ def datos_fetch(limit=200, offset=0, search:str=""):
     else:
         return q.range(offset, offset + limit - 1).execute().data or []
 
-
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
     seen = {}
-    if asignacion:
-        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("asignacion", asignacion).limit(50).execute()
-        for r in (res.data or []): seen[r["id"]] = r
-    if orden_meli:
-        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("orden_meli", orden_meli).limit(50).execute()
-        for r in (res.data or []): seen[r["id"]] = r
-    if pack_id:
-        res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq("pack_id", pack_id).limit(50).execute()
-        for r in (res.data or []): seen[r["id"]] = r
+    for field, value in [("asignacion", asignacion), ("orden_meli", orden_meli), ("pack_id", pack_id)]:
+        if value:
+            res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq(field, value).limit(50).execute()
+            for r in (res.data or []): seen[r["id"]] = r
     return list(seen.values())
-
 
 def datos_insert(payload: dict):
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
     return supabase.table(TABLE_NAME).insert(clean).execute()
-
 
 def datos_update(id_val: int, payload: dict):
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
@@ -254,12 +223,10 @@ if "datos_modal_row" not in st.session_state:
 if "datos_offset" not in st.session_state:
     st.session_state.datos_offset = 0
 
-
 def open_modal_new():
     st.session_state.datos_modal_mode = "new"
     st.session_state.datos_modal_row = datos_defaults()
     st.session_state.datos_modal_open = True
-
 
 def open_modal_edit(row: dict):
     st.session_state.datos_modal_mode = "edit"
@@ -268,10 +235,8 @@ def open_modal_edit(row: dict):
     st.session_state.datos_modal_row = base
     st.session_state.datos_modal_open = True
 
-
 def close_modal():
     st.session_state.datos_modal_open = False
-
 
 def _render_form_contents():
     mode = st.session_state.datos_modal_mode
@@ -362,7 +327,6 @@ def render_modal_if_needed():
         with st.expander("Formulario de registro", expanded=True):
             _render_form_contents()
 
-
 # ==============================
 # UI (NAV & COLORES)
 # ==============================
@@ -396,7 +360,6 @@ st.header(
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
-
 # ==============================
 # ESCANEO (ingresar / imprimir)
 # ==============================
@@ -421,6 +384,94 @@ if st.session_state.page in ("ingresar", "imprimir"):
     rows = get_logs(st.session_state.page)
     df = pd.DataFrame(rows)
 
-    visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
-                    "estado_orden", "estado_envio", "archivo_adjunto", "comentario", "titulo", "asin"]
-    df = df[[c for c in visible_cols
+    visible_cols = [
+        "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
+        "estado_orden", "estado_envio", "archivo_adjunto",
+        "comentario", "titulo", "asin"
+    ]
+    df = df[[c for c in visible_cols if c in df.columns]]
+
+    if "archivo_adjunto" in df.columns:
+        def make_button(url):
+            if url:
+                return f'<a href="{url}" target="_blank" download><button>Descargar</button></a>'
+            return "No disponible"
+        df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
+
+    if not df.empty:
+        st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    else:
+        st.info("No hay registros aún.")
+
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Filtered CSV",
+        csv,
+        f"log_{st.session_state.page}.csv",
+        "text/csv"
+    )
+
+# ==============================
+# PÁGINA DATOS
+# ==============================
+if st.session_state.page == "datos":
+    st.markdown("### Base de datos")
+
+    colf1, colf2, colf4 = st.columns([2,1,1])
+    with colf1:
+        search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
+    with colf2:
+        page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
+    with colf4:
+        if st.button("➕ Nuevo registro", use_container_width=True):
+            open_modal_new()
+
+    colp1, colp2, colp3 = st.columns([1,1,6])
+    with colp1:
+        if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
+            st.session_state.datos_offset -= page_size
+    with colp2:
+        if st.button("Siguiente ⟶"):
+            st.session_state.datos_offset += page_size
+
+    data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
+    df_all = pd.DataFrame(data_rows)
+
+    solo_sin_guia = st.checkbox("Solo sin guía", value=False)
+    if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
+        df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
+
+    if df_all.empty:
+        st.info("Sin registros para mostrar.")
+    else:
+        show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
+        df_all = df_all.copy()
+        df_all["Editar"] = False
+
+        if hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn"):
+            column_config = {"Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")}
+        else:
+            column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)}
+
+        ordered_cols = ["Editar"] + show_cols
+
+        edited_df = st.data_editor(
+            df_all[ordered_cols],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            disabled=show_cols,
+            column_config=column_config
+        )
+
+        try:
+            if "Editar" in edited_df.columns and edited_df["Editar"].any():
+                idx = edited_df.index[edited_df["Editar"]].tolist()[0]
+                row_dict = edited_df.loc[idx].to_dict()
+                row_dict.pop("Editar", None)
+                open_modal_edit(row_dict)
+        except Exception:
+            pass
+
+    render_modal_if_needed()
+
