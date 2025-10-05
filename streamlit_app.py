@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import pytz
 import time
+from io import BytesIO
 
 # ==============================
 # CONFIG
@@ -21,29 +22,14 @@ TZ = pytz.timezone("America/Santiago")
 # ==============================
 # STORAGE HELPERS (PDF)
 # ==============================
+
 def ensure_storage_bucket() -> bool:
-    try:
-        supabase.storage.from_(STORAGE_BUCKET).list()
-        return True
-    except Exception:
-        # No podemos verificar con anon key, asumimos que existe
-        return True
-    try:
-        buckets = supabase.storage.list_buckets()
-        names = [b.get("name") for b in buckets]
-        if STORAGE_BUCKET not in names:
-            st.error(
-                f"El bucket '{STORAGE_BUCKET}' no existe. "
-                f"Créalo en Supabase → Storage (público) y agrega las policies de SELECT/INSERT/UPDATE."
-            )
-            return False
-        return True
-    except Exception:
-        # Si el SDK no soporta list_buckets dejamos continuar
-        return True
+    """Evita verificar bucket con anon key (no tiene permisos)."""
+    return True
+
 
 def _get_public_or_signed_url(path: str) -> str | None:
-    """Intenta devolver URL pública; si no, una firmada (30 días)."""
+    """Devuelve URL pública o firmada si el bucket es privado."""
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
         if isinstance(url, dict):
@@ -58,36 +44,46 @@ def _get_public_or_signed_url(path: str) -> str | None:
             return signed.get("signedUrl") or signed.get("signedURL") or signed.get("signed_url")
         return signed
     except Exception as e:
-        st.error(f"❌ No se pudo generar URL del PDF: {e}")
+        st.error(f"❌ No se pudo generar URL firmada: {e}")
         return None
+
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
     Sube el PDF al bucket 'etiquetas' renombrándolo a <asignacion>.pdf.
-    Siempre reemplaza si ya existe y devuelve la URL pública.
+    Compatible con storage3, asegura MIME correcto y reemplazo si existe.
     """
-    if not asignacion or uploaded_file is None:
+    if not asignacion:
+        st.error("La asignación es requerida para subir el PDF.")
+        return None
+    if uploaded_file is None:
         return None
 
     key_path = f"{asignacion}.pdf"
-    file_bytes = uploaded_file.read()
 
     try:
-        # Subir con el nombre de la asignación y el tipo MIME correcto
+        # Leer bytes y envolver en stream tipo archivo
+        file_bytes = uploaded_file.read()
+        file_obj = BytesIO(file_bytes)
+
+        # Intento principal: subir con tipo MIME y upsert habilitado
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
-            file=file_bytes,
+            file=file_obj,
             file_options={"contentType": "application/pdf", "upsert": "true"},
         )
-    except Exception:
-        # Fallback para SDKs que no aceptan file_options/upsert
-        try:
-            supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_bytes)
-        except Exception:
-            supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
 
-    # Generar URL pública del archivo final
-    return supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
+    except Exception as e1:
+        # SDKs antiguos pueden no aceptar file_options
+        try:
+            file_obj.seek(0)
+            supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_obj)
+        except Exception as e2:
+            st.error(f"❌ Error subiendo PDF: {e1} / {e2}")
+            return None
+
+    # Obtener URL pública o firmada
+    return _get_public_or_signed_url(key_path)
 
 
 # ==============================
@@ -97,6 +93,7 @@ def lookup_by_guia(guia: str):
     response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return response.data[0] if response.data else None
 
+
 def update_ingreso(guia: str):
     now = datetime.now(TZ)
     supabase.table(TABLE_NAME).update({
@@ -104,11 +101,13 @@ def update_ingreso(guia: str):
         "estado_escaneo": "INGRESADO CORRECTAMENTE!"
     }).eq("guia", guia).execute()
 
+
 def update_impresion(guia: str):
     now = datetime.now(TZ)
     supabase.table(TABLE_NAME).update({
         "fecha_impresion": now.isoformat()
     }).eq("guia", guia).execute()
+
 
 def insert_no_coincidente(guia: str):
     now = datetime.now(TZ)
@@ -131,6 +130,7 @@ def insert_no_coincidente(guia: str):
     except Exception as e:
         st.error(f"❌ Error al insertar NO COINCIDENTE ({guia}): {e}")
 
+
 def get_logs(page: str):
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
     if page == "ingresar":
@@ -138,6 +138,7 @@ def get_logs(page: str):
     else:
         response = supabase.table(TABLE_NAME).select("*").gte("fecha_impresion", cutoff).order("fecha_impresion", desc=True).execute()
     return response.data if response.data else []
+
 
 # ==============================
 # ESCANEO
@@ -166,6 +167,7 @@ def process_scan(guia: str):
     else:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
+
 
 # ==============================
 # DATOS (CRUD)
@@ -200,10 +202,10 @@ def datos_defaults():
         pack_id=""
     )
 
+
 def datos_fetch(limit=200, offset=0, search:str=""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
-        # búsqueda secuencial simple (equivalente a OR)
         res = q.ilike("asignacion", f"%{search}%").range(offset, offset + limit - 1).execute()
         data = res.data or []
         if not data:
@@ -215,6 +217,7 @@ def datos_fetch(limit=200, offset=0, search:str=""):
         return data
     else:
         return q.range(offset, offset + limit - 1).execute().data or []
+
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
     seen = {}
@@ -229,9 +232,11 @@ def datos_find_duplicates(asignacion, orden_meli, pack_id):
         for r in (res.data or []): seen[r["id"]] = r
     return list(seen.values())
 
+
 def datos_insert(payload: dict):
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
     return supabase.table(TABLE_NAME).insert(clean).execute()
+
 
 def datos_update(id_val: int, payload: dict):
     clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
@@ -249,10 +254,12 @@ if "datos_modal_row" not in st.session_state:
 if "datos_offset" not in st.session_state:
     st.session_state.datos_offset = 0
 
+
 def open_modal_new():
     st.session_state.datos_modal_mode = "new"
     st.session_state.datos_modal_row = datos_defaults()
     st.session_state.datos_modal_open = True
+
 
 def open_modal_edit(row: dict):
     st.session_state.datos_modal_mode = "edit"
@@ -261,8 +268,10 @@ def open_modal_edit(row: dict):
     st.session_state.datos_modal_row = base
     st.session_state.datos_modal_open = True
 
+
 def close_modal():
     st.session_state.datos_modal_open = False
+
 
 def _render_form_contents():
     mode = st.session_state.datos_modal_mode
@@ -280,39 +289,31 @@ def _render_form_contents():
     data["pack_id"] = colC.text_input("pack_id (opcional)", value=(data.get("pack_id") or ""))
 
     col1, col2, col3 = st.columns(3)
-    data["guia"]   = col1.text_input("guia", value=(data.get("guia") or ""))
+    data["guia"] = col1.text_input("guia", value=(data.get("guia") or ""))
     data["titulo"] = col2.text_input("titulo", value=(data.get("titulo") or ""))
-    data["asin"]   = col3.text_input("asin", value=(data.get("asin") or ""))
+    data["asin"] = col3.text_input("asin", value=(data.get("asin") or ""))
 
     col4, col5, col6 = st.columns(3)
-    data["cantidad"]     = col4.number_input("cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1)
+    data["cantidad"] = col4.number_input("cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1)
     data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
     data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
 
-    # Si ya hay PDF, botón de descarga
     current_pdf = data.get("archivo_adjunto") or ""
     if current_pdf:
         st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
 
-    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=current_pdf)
-    data["url_imagen"]      = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
-    data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
-    data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
-
-    # Subir/reemplazar PDF
     st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
     pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
 
     col_btn1, col_btn2 = st.columns([1,1])
     submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
-    cancel    = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
+    cancel = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
 
     if cancel:
         close_modal()
         st.rerun()
 
     if submitted:
-        # Si hay PDF adjunto, subir antes y setear URL
         if pdf_file is not None:
             asign = (data.get("asignacion") or "").strip()
             if not asign:
@@ -348,6 +349,7 @@ def _render_form_contents():
             close_modal()
             st.rerun()
 
+
 def render_modal_if_needed():
     if not st.session_state.datos_modal_open:
         return
@@ -359,6 +361,7 @@ def render_modal_if_needed():
     else:
         with st.expander("Formulario de registro", expanded=True):
             _render_form_contents()
+
 
 # ==============================
 # UI (NAV & COLORES)
@@ -393,6 +396,7 @@ st.header(
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
+
 # ==============================
 # ESCANEO (ingresar / imprimir)
 # ==============================
@@ -419,89 +423,4 @@ if st.session_state.page in ("ingresar", "imprimir"):
 
     visible_cols = ["asignacion", "guia", "fecha_ingreso", "estado_escaneo",
                     "estado_orden", "estado_envio", "archivo_adjunto", "comentario", "titulo", "asin"]
-    df = df[[c for c in visible_cols if c in df.columns]]
-
-    if "archivo_adjunto" in df.columns:
-        def make_button(url):
-            if url:
-                return f'<a href="{url}" target="_blank" download><button>Descargar</button></a>'
-            return "No disponible"
-        df["archivo_adjunto"] = df["archivo_adjunto"].apply(make_button)
-
-    if not df.empty:
-        st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
-    else:
-        st.info("No hay registros aún.")
-
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
-
-# ==============================
-# PÁGINA DATOS
-# ==============================
-if st.session_state.page == "datos":
-    st.markdown("### Base de datos")
-
-    colf1, colf2, colf4 = st.columns([2,1,1])
-    with colf1:
-        search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
-    with colf2:
-        page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
-    with colf4:
-        if st.button("➕ Nuevo registro", use_container_width=True):
-            open_modal_new()
-
-    colp1, colp2, colp3 = st.columns([1,1,6])
-    with colp1:
-        if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
-            st.session_state.datos_offset -= page_size
-    with colp2:
-        if st.button("Siguiente ⟶"):
-            st.session_state.datos_offset += page_size
-
-    data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
-    df_all = pd.DataFrame(data_rows)
-
-    # Filtro rápido pegado a la tabla
-    solo_sin_guia = st.checkbox("Solo sin guía", value=False)
-    if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
-        df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
-
-    if df_all.empty:
-        st.info("Sin registros para mostrar.")
-    else:
-        show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
-        df_all = df_all.copy()
-
-        # Columna 'Editar' como primera
-        has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
-        df_all["Editar"] = False
-        if has_button_col:
-            column_config = {"Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")}
-        else:
-            column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Marca para editar", default=False)}
-
-        ordered_cols = ["Editar"] + show_cols
-
-        edited_df = st.data_editor(
-            df_all[ordered_cols],
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            disabled=show_cols,
-            column_config=column_config
-        )
-
-        try:
-            if "Editar" in edited_df.columns and edited_df["Editar"].any():
-                idx = edited_df.index[edited_df["Editar"]].tolist()[0]
-                row_dict = edited_df.loc[idx].to_dict()
-                row_dict.pop("Editar", None)
-                open_modal_edit(row_dict)
-        except Exception:
-            pass
-
-    render_modal_if_needed()
-
-
-
+    df = df[[c for c in visible_cols
