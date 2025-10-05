@@ -34,37 +34,41 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
-    """Sube el PDF al bucket 'etiquetas/<asignacion>.pdf'"""
-    if not asignacion or uploaded_file is None:
+    """
+    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas' (reemplaza si existe)
+    y se asegura de que el tipo MIME sea application/pdf.
+    """
+    if not asignacion:
+        st.error("La asignación es requerida para subir el PDF.")
+        return None
+    if uploaded_file is None:
         return None
 
     key_path = f"{asignacion}.pdf"
     file_bytes = uploaded_file.read()
 
     try:
-        # Subida del archivo
-        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes, {"upsert": "true"})
+        # Subida directa
+        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # Corrige MIME
+    # ✅ Reajustar tipo MIME usando la API REST de Supabase
     try:
         headers = {
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "apikey": SUPABASE_KEY,
             "Content-Type": "application/json",
         }
-        requests.patch(
-            f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}",
-            headers=headers,
-            json={"contentType": "application/pdf"},
-            timeout=5
-        )
+        payload = {"contentType": "application/pdf"}
+        url = f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}"
+        requests.patch(url, headers=headers, json=payload, timeout=5)
     except Exception:
         pass
 
-    return _get_public_or_signed_url(key_path)
+    return supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
+
 
 
 def build_download_url(public_url: str, asignacion: str | None = None) -> str:
@@ -146,7 +150,6 @@ def process_scan(guia: str):
     match = lookup_by_guia(guia)
     now = datetime.now(TZ)
 
-    # --- Si no existe ---
     if not match:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
@@ -156,43 +159,43 @@ def process_scan(guia: str):
     asignacion = (match.get("asignacion") or "etiqueta").strip()
     archivo_public = match.get("archivo_adjunto") or ""
 
-    # --- MODO INGRESAR ---
+    # --- INGRESAR ---
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
         st.rerun()
         return
 
-    # --- MODO IMPRIMIR ---
+    # --- IMPRIMIR ---
     if st.session_state.page == "imprimir":
         update_impresion(guia)
 
         if archivo_public:
-            # ✅ Muestra mensaje y fuerza la descarga sin botones JS bloqueados
-            st.success(f"🖨️ Etiqueta {asignacion} disponible. Descargando automáticamente...")
+            # 🔄 Reemplazar espacios o parámetros extra
+            archivo_public = archivo_public.strip()
 
-            # Forzar descarga automática usando meta-refresh (más confiable que JS en Streamlit)
+            # ✅ Descargar automáticamente abriendo en nueva pestaña (más seguro)
             st.markdown(
                 f"""
-                <meta http-equiv="refresh" content="0; url={archivo_public}">
-                <p style="color:green;font-weight:bold;">
-                La descarga de <b>{asignacion}.pdf</b> debería comenzar automáticamente.<br>
-                Si no inicia, <a href="{archivo_public}" download>haz clic aquí para descargar manualmente</a>.
-                </p>
+                <script>
+                window.open("{archivo_public}?download={asignacion}.pdf", "_blank");
+                </script>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # 🔁 Actualiza registro con la hora exacta de impresión
+            st.success(f"🖨️ Etiqueta {asignacion}.pdf disponible, descarga iniciada.")
+
+            # Actualizar timestamp en BD
             supabase.table(TABLE_NAME).update({
                 "fecha_impresion": now.isoformat()
             }).eq("guia", guia).execute()
-
         else:
             st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
-        # 🔁 Actualiza el log de abajo siempre
+        # Refrescar log
         st.rerun()
+
 
 
 # ==============================
