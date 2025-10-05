@@ -8,7 +8,7 @@ import requests
 from io import BytesIO
 
 # ==============================
-# CONFIGURACIÓN GENERAL
+# CONFIG
 # ==============================
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
@@ -21,22 +21,52 @@ STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# HELPERS DE STORAGE
+# STORAGE HELPERS
 # ==============================
+def ensure_storage_bucket() -> bool:
+    """Evita verificar bucket con anon key (no tiene permisos)."""
+    return True
+
+
 def _get_public_or_signed_url(path: str) -> str | None:
+    """Devuelve URL pública o firmada si el bucket es privado."""
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
         if isinstance(url, dict):
             url = url.get("publicUrl") or url.get("public_url") or url.get("publicURL")
-        return url
+        if url:
+            return url
+    except Exception:
+        pass
+    try:
+        signed = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(path, 60 * 60 * 24 * 30)
+        if isinstance(signed, dict):
+            return signed.get("signedUrl") or signed.get("signedURL") or signed.get("signed_url")
+        return signed
     except Exception:
         return None
+
+
+def url_disponible(url: str) -> bool:
+    """Verifica si un enlace público realmente existe."""
+    if not url:
+        return False
+    try:
+        r = requests.head(url, timeout=5)
+        if r.status_code == 200:
+            return True
+        if r.status_code == 405:
+            r = requests.get(url, stream=True, timeout=5)
+            return r.status_code == 200
+        return False
+    except Exception:
+        return False
 
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
     Sube el PDF como <asignacion>.pdf al bucket 'etiquetas' (reemplaza si existe)
-    y se asegura de que el tipo MIME sea application/pdf.
+    y corrige el tipo MIME después de subirlo.
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
@@ -48,58 +78,33 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     file_bytes = uploaded_file.read()
 
     try:
-        # Subida directa
         supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # ✅ Reajustar tipo MIME usando la API REST de Supabase
+    # Ajustar MIME application/pdf
     try:
         headers = {
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "apikey": SUPABASE_KEY,
             "Content-Type": "application/json",
         }
-        payload = {"contentType": "application/pdf"}
+        json_body = {"contentType": "application/pdf"}
         url = f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}"
-        requests.patch(url, headers=headers, json=payload, timeout=5)
+        requests.patch(url, headers=headers, json=json_body, timeout=5)
     except Exception:
         pass
 
-    return supabase.storage.from_(STORAGE_BUCKET).get_public_url(key_path)
-
-
-
-def build_download_url(public_url: str, asignacion: str | None = None) -> str:
-    """Convierte /object/public/ → /object/download/ para forzar descarga"""
-    if not public_url:
-        return ""
-    if "/object/public/" in public_url:
-        tail = public_url.split("/object/public/", 1)[1]
-        return f"{SUPABASE_URL}/storage/v1/object/download/{tail}"
-    if asignacion:
-        return f"{SUPABASE_URL}/storage/v1/object/download/{STORAGE_BUCKET}/{asignacion}.pdf"
-    return public_url
-
-
-def url_disponible(url: str) -> bool:
-    """Verifica si una URL devuelve 200"""
-    if not url:
-        return False
-    try:
-        r = requests.head(url, timeout=5)
-        return r.status_code == 200
-    except Exception:
-        return False
+    return _get_public_or_signed_url(key_path)
 
 
 # ==============================
-# HELPERS DE BASE DE DATOS
+# DB HELPERS
 # ==============================
 def lookup_by_guia(guia: str):
-    res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
-    return res.data[0] if res.data else None
+    response = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
+    return response.data[0] if response.data else None
 
 
 def update_ingreso(guia: str):
@@ -113,7 +118,8 @@ def update_ingreso(guia: str):
 def update_impresion(guia: str):
     now = datetime.now(TZ)
     supabase.table(TABLE_NAME).update({
-        "fecha_impresion": now.isoformat()
+        "fecha_impresion": now.isoformat(),
+        "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"
     }).eq("guia", guia).execute()
 
 
@@ -149,69 +155,92 @@ def get_logs(page: str):
     return response.data if response.data else []
 
 
-
 # ==============================
-# PROCESAR ESCANEO (VERSIÓN ESTABLE FINAL)
+# PROCESAR ESCANEO
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
-    now = datetime.now(TZ)
-
     if not match:
         insert_no_coincidente(guia)
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
-        st.rerun()
         return
 
-    asignacion = (match.get("asignacion") or "etiqueta").strip()
-    archivo_public = match.get("archivo_adjunto") or ""
-
-    # --- INGRESAR ---
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
-        st.rerun()
         return
 
-    # --- IMPRIMIR ---
     if st.session_state.page == "imprimir":
         update_impresion(guia)
+        archivo_public = match.get("archivo_adjunto") or ""
+        asignacion = (match.get("asignacion") or "etiqueta").strip()
 
         if archivo_public:
-            # 🔄 Reemplazar espacios o parámetros extra
-            archivo_public = archivo_public.strip()
+            st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
 
-            # ✅ Descargar automáticamente abriendo en nueva pestaña (más seguro)
-            st.markdown(
-                f"""
-                <script>
-                window.open("{archivo_public}?download={asignacion}.pdf", "_blank");
-                </script>
-                """,
-                unsafe_allow_html=True,
-            )
+            # Mostrar botón de descarga inmediata
+            pdf_bytes = None
+            try:
+                resp = requests.get(archivo_public)
+                if resp.status_code == 200:
+                    pdf_bytes = resp.content
+            except Exception:
+                pass
 
-            st.success(f"🖨️ Etiqueta {asignacion}.pdf disponible, descarga iniciada.")
-
-            # Actualizar timestamp en BD
-            supabase.table(TABLE_NAME).update({
-                "fecha_impresion": now.isoformat()
-            }).eq("guia", guia).execute()
+            if pdf_bytes:
+                st.download_button(
+                    label=f"📄 Descargar nuevamente {asignacion}.pdf",
+                    data=pdf_bytes,
+                    file_name=f"{asignacion}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
         else:
             st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
-        # Refrescar log
-        st.rerun()
 
+# ==============================
+# DATOS CRUD Y UI
+# ==============================
+ALL_COLUMNS = [
+    "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
+    "asin", "cantidad", "estado_orden", "estado_envio",
+    "archivo_adjunto", "url_imagen", "comentario", "descripcion",
+    "fecha_impresion", "titulo", "orden_meli", "pack_id"
+]
+
+REQUIRED_FIELDS = ["asignacion", "orden_meli"]
+LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]
+
+def datos_defaults():
+    return dict(id=None, asignacion="", guia="", fecha_ingreso=None,
+                estado_escaneo="", asin="", cantidad=1, estado_orden="",
+                estado_envio="", archivo_adjunto="", url_imagen="", comentario="",
+                descripcion="", fecha_impresion=None, titulo="", orden_meli="", pack_id="")
+
+def datos_fetch(limit=200, offset=0, search:str=""):
+    q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
+    if search:
+        res = q.ilike("asignacion", f"%{search}%").range(offset, offset + limit - 1).execute()
+        data = res.data or []
+        if not data:
+            for col in ["guia", "orden_meli", "pack_id", "titulo"]:
+                res = supabase.table(TABLE_NAME).select("*").ilike(col, f"%{search}%").order("id", desc=True).range(offset, offset + limit - 1).execute()
+                if res.data:
+                    data = res.data
+                    break
+        return data
+    else:
+        return q.range(offset, offset + limit - 1).execute().data or []
 
 
 # ==============================
-# INTERFAZ GENERAL
+# UI GENERAL
 # ==============================
 if "page" not in st.session_state:
     st.session_state.page = "ingresar"
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns([1,1,1])
 with col1:
     if st.button("INGRESAR PAQUETES"):
         st.session_state.page = "ingresar"
@@ -222,25 +251,30 @@ with col3:
     if st.button("🗃️ DATOS"):
         st.session_state.page = "datos"
 
-bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}[st.session_state.page]
-st.markdown(f"<style>.stApp{{background-color:{bg};}}</style>", unsafe_allow_html=True)
+if st.session_state.page == "ingresar":
+    st.markdown("<style>.stApp{background-color:#71A9D9;}</style>", unsafe_allow_html=True)
+elif st.session_state.page == "imprimir":
+    st.markdown("<style>.stApp{background-color:#71D999;}</style>", unsafe_allow_html=True)
+else:
+    st.markdown("<style>.stApp{background-color:#F2F4F4;}</style>", unsafe_allow_html=True)
+
 st.header(
     "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
 # ==============================
-# SECCIONES PRINCIPALES
-# ==============================
-# ==============================
-# LOG DE ESCANEOS (ingresar / imprimir)
+# ESCANEO Y LOG
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
+    scan_val = st.text_area("Escanea aquí (o pega el número de guía)", key="scan_input")
+    if st.button("Procesar escaneo"):
+        process_scan(scan_val.strip())
+
     st.subheader("Registro de escaneos (últimos 60 días)")
     rows = get_logs(st.session_state.page)
     df = pd.DataFrame(rows)
 
-    # columnas visibles dinámicas según página
     if st.session_state.page == "imprimir":
         visible_cols = [
             "asignacion", "guia", "fecha_impresion", "estado_escaneo",
@@ -254,74 +288,52 @@ if st.session_state.page in ("ingresar", "imprimir"):
             "comentario", "titulo", "asin"
         ]
 
-    # filtra solo las columnas que existan
     df = df[[c for c in visible_cols if c in df.columns]]
 
-    # convierte URLs en botones de descarga
     if "archivo_adjunto" in df.columns:
         def make_button(url, asignacion="Etiqueta"):
-            if url:
+            if url_disponible(url):
                 nombre = asignacion if isinstance(asignacion, str) else "Etiqueta"
                 return f'<a href="{url}" target="_blank" download="{nombre}.pdf"><button>Descargar</button></a>'
             return "No disponible"
+        df["archivo_adjunto"] = [make_button(row.get("archivo_adjunto"), row.get("asignacion")) for _, row in df.iterrows()]
 
-        df["archivo_adjunto"] = [
-            make_button(row.get("archivo_adjunto"), row.get("asignacion"))
-            for _, row in df.iterrows()
-        ]
-
-    # render tabla
     if not df.empty:
         st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
     else:
         st.info("No hay registros aún.")
 
-    # botón CSV
     csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download Filtered CSV",
-        csv,
-        f"log_{st.session_state.page}.csv",
-        "text/csv"
-    )
-
-# ==============================
-# CRUD DATOS (simplificado para estabilidad)
-# ==============================
-if st.session_state.page == "datos":
-    st.markdown("### Base de datos completa")
-
-    search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)")
-    page_size = st.selectbox("Filas por página", [25,50,100,200], index=1)
-
-    q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
-    if search:
-        q = q.or_(
-            f"asignacion.ilike.%{search}%,guia.ilike.%{search}%,orden_meli.ilike.%{search}%,pack_id.ilike.%{search}%,titulo.ilike.%{search}%"
-        )
-    data = q.limit(page_size).execute().data or []
-
-    if not data:
-        st.info("Sin registros para mostrar.")
-    else:
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
-
+    st.download_button("Download Filtered CSV", csv, f"log_{st.session_state.page}.csv", "text/csv")
 
 
 # ==============================
 # LIMPIAR ADJUNTOS INVÁLIDOS
 # ==============================
 def limpiar_adjuntos_invalidos():
-    st.info("🔍 Verificando enlaces de PDFs...")
-    res = supabase.table(TABLE_NAME).select("id, archivo_adjunto").neq("archivo_adjunto", None).execute()
-    rows = res.data or []
+    st.info("🔍 Verificando enlaces de PDFs... esto puede tardar unos segundos.")
+    try:
+        res = supabase.table(TABLE_NAME).select("id, archivo_adjunto").execute()
+        rows = [r for r in (res.data or []) if r.get("archivo_adjunto")]
+    except Exception as e:
+        st.error(f"❌ Error leyendo datos: {e}")
+        return
+
     total = 0
     for r in rows:
         url = r.get("archivo_adjunto")
-        if not url_disponible(url):
-            supabase.table(TABLE_NAME).update({"archivo_adjunto": None}).eq("id", r["id"]).execute()
-            total += 1
+        if not url:
+            continue
+        try:
+            resp = requests.head(url, timeout=5)
+            if resp.status_code == 404:
+                supabase.table(TABLE_NAME).update({"archivo_adjunto": None}).eq("id", r["id"]).execute()
+                total += 1
+        except Exception:
+            continue
+
     st.success(f"✅ Se limpiaron {total} enlaces inválidos.")
+
 
 if st.button("🧹 Limpiar adjuntos inválidos"):
     limpiar_adjuntos_invalidos()
