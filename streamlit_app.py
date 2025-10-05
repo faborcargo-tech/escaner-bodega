@@ -138,9 +138,16 @@ def insert_no_coincidente(guia: str):
 
 def get_logs(page: str):
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
-    field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
-    res = supabase.table(TABLE_NAME).select("*").gte(field, cutoff).order(field, desc=True).execute()
-    return res.data or []
+    if page == "ingresar":
+        response = supabase.table(TABLE_NAME).select(
+            "asignacion, guia, fecha_ingreso, estado_escaneo, estado_orden, estado_envio, archivo_adjunto, comentario, titulo, asin"
+        ).gte("fecha_ingreso", cutoff).order("fecha_ingreso", desc=True).execute()
+    else:
+        response = supabase.table(TABLE_NAME).select(
+            "asignacion, guia, fecha_impresion, estado_escaneo, estado_orden, estado_envio, archivo_adjunto, comentario, titulo, asin"
+        ).gte("fecha_impresion", cutoff).order("fecha_impresion", desc=True).execute()
+    return response.data if response.data else []
+
 
 
 # ==============================
@@ -225,32 +232,58 @@ st.header(
 # ==============================
 # SECCIONES PRINCIPALES
 # ==============================
+# ==============================
+# LOG DE ESCANEOS (ingresar / imprimir)
+# ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
-    scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
-    if st.button("Procesar escaneo"):
-        process_scan(scan_val.strip())
-
-    # Log
     st.subheader("Registro de escaneos (últimos 60 días)")
-    df = pd.DataFrame(get_logs(st.session_state.page))
+    rows = get_logs(st.session_state.page)
+    df = pd.DataFrame(rows)
+
+    # columnas visibles dinámicas según página
+    if st.session_state.page == "imprimir":
+        visible_cols = [
+            "asignacion", "guia", "fecha_impresion", "estado_escaneo",
+            "estado_orden", "estado_envio", "archivo_adjunto",
+            "comentario", "titulo", "asin"
+        ]
+    else:
+        visible_cols = [
+            "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
+            "estado_orden", "estado_envio", "archivo_adjunto",
+            "comentario", "titulo", "asin"
+        ]
+
+    # filtra solo las columnas que existan
+    df = df[[c for c in visible_cols if c in df.columns]]
+
+    # convierte URLs en botones de descarga
+    if "archivo_adjunto" in df.columns:
+        def make_button(url, asignacion="Etiqueta"):
+            if url:
+                nombre = asignacion if isinstance(asignacion, str) else "Etiqueta"
+                return f'<a href="{url}" target="_blank" download="{nombre}.pdf"><button>Descargar</button></a>'
+            return "No disponible"
+
+        df["archivo_adjunto"] = [
+            make_button(row.get("archivo_adjunto"), row.get("asignacion"))
+            for _, row in df.iterrows()
+        ]
+
+    # render tabla
     if not df.empty:
-        visible_cols = ["asignacion","guia","fecha_ingreso","estado_escaneo",
-                        "estado_orden","estado_envio","archivo_adjunto",
-                        "comentario","titulo","asin"]
-        df = df[[c for c in visible_cols if c in df.columns]]
-        if "archivo_adjunto" in df.columns:
-            df["archivo_adjunto"] = df.apply(
-                lambda r: (
-                    f'<a href="{build_download_url(r["archivo_adjunto"],r["asignacion"])}" download>'
-                    '<button>Descargar</button></a>'
-                    if url_disponible(r["archivo_adjunto"]) else "No disponible"
-                ),
-                axis=1
-            )
-        st.write(df.to_html(escape=False,index=False), unsafe_allow_html=True)
+        st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
     else:
         st.info("No hay registros aún.")
 
+    # botón CSV
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Filtered CSV",
+        csv,
+        f"log_{st.session_state.page}.csv",
+        "text/csv"
+    )
 
 # ==============================
 # CRUD DATOS (simplificado para estabilidad)
@@ -272,6 +305,7 @@ if st.session_state.page == "datos":
         st.info("Sin registros para mostrar.")
     else:
         st.dataframe(pd.DataFrame(data), use_container_width=True)
+
 
 
 # ==============================
