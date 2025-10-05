@@ -285,12 +285,21 @@ def _render_form_contents():
     data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
     data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
 
+        # Si ya hay PDF, muestra botón de descarga
     current_pdf = data.get("archivo_adjunto") or ""
     if current_pdf:
         st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
 
+    # Campos visibles (como antes)
+    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=current_pdf)
+    data["url_imagen"]      = st.text_input("url_imagen (URL de imagen del producto)", value=(data.get("url_imagen") or ""))
+    data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
+    data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
+
+    # Subir/reemplazar PDF
     st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
     pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
+
 
     col_btn1, col_btn2 = st.columns([1,1])
     submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
