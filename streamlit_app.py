@@ -47,10 +47,15 @@ def _get_public_or_signed_url(path: str) -> str | None:
         return None
 
 
-def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
+from typing import Optional
+
+def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
     """
     Sube el PDF al bucket 'etiquetas' renombrándolo a <asignacion>.pdf.
-    Compatible con storage3, asegura MIME correcto y reemplazo si existe.
+    - Usa BYTES (no BytesIO) porque tu storage3 lo exige.
+    - Reemplaza si ya existe con upsert=True.
+    - Fuerza MIME application/pdf.
+    - Devuelve URL pública o firmada.
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
@@ -59,25 +64,42 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
         return None
 
     key_path = f"{asignacion}.pdf"
+    file_bytes = uploaded_file.read()  # 👈 BYTES (no BytesIO)
 
+    # Intento A: firma típica (upsert como kw separado + contentType en camelCase)
     try:
-        file_bytes = uploaded_file.read()
-        file_obj = BytesIO(file_bytes)
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
-            file=file_obj,
-            file_options={"contentType": "application/pdf", "upsert": "true"},
+            file=file_bytes,
+            file_options={"contentType": "application/pdf"},
+            upsert=True,                             # 👈 reemplazo
         )
-
-    except Exception as e1:
+    except TypeError:
+        # Intento B: upsert dentro de file_options (SDK intermedio)
         try:
-            file_obj.seek(0)
-            supabase.storage.from_(STORAGE_BUCKET).update(key_path, file_obj)
-        except Exception as e2:
-            st.error(f"❌ Error subiendo PDF: {e1} / {e2}")
-            return None
+            supabase.storage.from_(STORAGE_BUCKET).upload(
+                path=key_path,
+                file=file_bytes,
+                file_options={"contentType": "application/pdf", "upsert": True},
+            )
+        except TypeError:
+            # Intento C: claves snake_case (SDK más antiguo)
+            try:
+                supabase.storage.from_(STORAGE_BUCKET).upload(
+                    path=key_path,
+                    file=file_bytes,
+                    file_options={"content_type": "application/pdf", "upsert": True},
+                )
+            except Exception as e:
+                st.error(f"❌ Error subiendo PDF: {e}")
+                return None
+    except Exception as e:
+        st.error(f"❌ Error subiendo PDF: {e}")
+        return None
 
+    # URL pública o firmada (según bucket)
     return _get_public_or_signed_url(key_path)
+
 
 # ==============================
 # DB HELPERS
