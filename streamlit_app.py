@@ -69,13 +69,10 @@ def url_disponible(url: str) -> bool:
         return False
 
 
-def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
+def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
-    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas'.
-    - Usa BYTES (no BytesIO).
-    - Fuerza MIME correcto.
-    - Reemplaza si existe con upsert="true" (string).
-    - Devuelve URL pública o firmada.
+    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas'
+    asegurando el tipo MIME correcto y reemplazo (upsert).
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
@@ -84,27 +81,23 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
         return None
 
     key_path = f"{asignacion}.pdf"
-    file_bytes = uploaded_file.read()  # ✅ bytes, no BytesIO
+    file_bytes = uploaded_file.read()  # bytes crudos del PDF
 
     try:
-        # En tu SDK, pasar upsert como string evita el fallo de headers booleanos
+        # 🧩 Forzamos content_type correctamente reconocido
         supabase.storage.from_(STORAGE_BUCKET).upload(
             path=key_path,
             file=file_bytes,
-            file_options={"contentType": "application/pdf", "upsert": "true"},
-        )
-    except TypeError:
-        # Variante snake_case por si tu storage3 lo requiere
-        supabase.storage.from_(STORAGE_BUCKET).upload(
-            path=key_path,
-            file=file_bytes,
-            file_options={"content_type": "application/pdf", "upsert": "true"},
+            content_type="application/pdf",  # <- usa este param directo
+            upsert=True,                     # <- reemplaza si ya existe
         )
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
+    # Devolver URL pública o firmada
     return _get_public_or_signed_url(key_path)
+
 
 
 # ==============================
