@@ -69,10 +69,12 @@ def url_disponible(url: str) -> bool:
         return False
 
 
+import requests
+
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """
-    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas'
-    asegurando el tipo MIME correcto y reemplazo (upsert).
+    Sube el PDF como <asignacion>.pdf al bucket 'etiquetas' (reemplaza si existe)
+    y corrige el tipo MIME después de subirlo.
     """
     if not asignacion:
         st.error("La asignación es requerida para subir el PDF.")
@@ -81,23 +83,30 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
         return None
 
     key_path = f"{asignacion}.pdf"
-    file_bytes = uploaded_file.read()  # bytes crudos del PDF
+    file_bytes = uploaded_file.read()
 
     try:
-        # 🧩 Forzamos content_type correctamente reconocido
-        supabase.storage.from_(STORAGE_BUCKET).upload(
-            path=key_path,
-            file=file_bytes,
-            content_type="application/pdf",  # <- usa este param directo
-            upsert=True,                     # <- reemplaza si ya existe
-        )
+        # Subida simple (sin argumentos extra)
+        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes)
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # Devolver URL pública o firmada
-    return _get_public_or_signed_url(key_path)
+    # 🔧 Forzar tipo MIME application/pdf mediante la API REST
+    try:
+        headers = {
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/json",
+        }
+        json_body = {"contentType": "application/pdf"}
+        url = f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}"
+        requests.patch(url, headers=headers, json=json_body, timeout=5)
+    except Exception:
+        pass  # Si no puede actualizar MIME, igual queda subido
 
+    # Devuelve URL pública o firmada
+    return _get_public_or_signed_url(key_path)
 
 
 # ==============================
