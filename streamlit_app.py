@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 import pytz
 import requests
 import time
+from io import BytesIO
 
 # ==============================
-# CONFIGURACIÓN
+# CONFIG GENERAL
 # ==============================
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
@@ -20,7 +21,7 @@ STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# FUNCIONES DE STORAGE
+# STORAGE HELPERS
 # ==============================
 def _get_public_or_signed_url(path: str) -> str | None:
     try:
@@ -33,7 +34,7 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
-    """Sube un PDF y devuelve su URL pública, asegurando MIME application/pdf."""
+    """Sube PDF al bucket y devuelve su URL pública."""
     if not asignacion or uploaded_file is None:
         return None
     key_path = f"{asignacion}.pdf"
@@ -43,13 +44,9 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
-    # Corrige MIME a application/pdf
+    # Corrige MIME
     try:
-        headers = {
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY,
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "apikey": SUPABASE_KEY}
         requests.patch(
             f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}",
             headers=headers,
@@ -62,7 +59,7 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
 
 
 def build_download_url(public_url: str, asignacion: str | None = None) -> str:
-    """Convierte /object/public/ → /object/download/ para forzar descarga."""
+    """Convierte enlace público a descarga forzada."""
     if not public_url:
         return ""
     if "/object/public/" in public_url:
@@ -74,7 +71,7 @@ def build_download_url(public_url: str, asignacion: str | None = None) -> str:
 
 
 def url_disponible(url: str) -> bool:
-    """Verifica si una URL está accesible (200 OK)."""
+    """Verifica que un URL responda 200."""
     if not url:
         return False
     try:
@@ -84,7 +81,7 @@ def url_disponible(url: str) -> bool:
         return False
 
 # ==============================
-# BASE DE DATOS
+# DATABASE HELPERS
 # ==============================
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -133,7 +130,7 @@ def get_logs(page: str):
     return res.data or []
 
 # ==============================
-# ESCANEO
+# PROCESAR ESCANEO
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -142,24 +139,35 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
         return
 
-    # ---- MODO INGRESAR ----
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente")
         return
 
-    # ---- MODO IMPRIMIR ----
     if st.session_state.page == "imprimir":
         update_impresion(guia)
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
         if archivo_public:
-            # URL que fuerza descarga (no muestra “código raro” del PDF)
             download_url = build_download_url(archivo_public, asignacion)
             st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
 
-            # Botón de respaldo (descarga binaria correcta)
+            # JavaScript para descarga directa
+            js = f"""
+            <script>
+            const link = document.createElement('a');
+            link.href = '{download_url}';
+            link.download = '{asignacion}.pdf';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            </script>
+            """
+            st.components.v1.html(js, height=0)
+
+            # Botón extra por si quiere descargar nuevamente
             st.download_button(
                 label=f"📄 Descargar nuevamente {asignacion}.pdf",
                 data=requests.get(download_url).content,
@@ -167,19 +175,33 @@ def process_scan(guia: str):
                 mime="application/pdf",
                 use_container_width=True,
             )
+
+            # Inserta registro en tabla de logs (cada impresión)
+            now = datetime.now(TZ).isoformat()
+            supabase.table(TABLE_NAME).insert({
+                "asignacion": asignacion,
+                "guia": guia,
+                "fecha_impresion": now,
+                "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!",
+                "estado_orden": match.get("estado_orden"),
+                "estado_envio": match.get("estado_envio"),
+                "archivo_adjunto": archivo_public,
+                "comentario": match.get("comentario"),
+                "titulo": match.get("titulo"),
+                "asin": match.get("asin")
+            }).execute()
         else:
             st.warning("⚠️ Etiqueta no disponible para esta guía.")
 
 # ==============================
-# UI PRINCIPAL (con persistencia de sección)
+# INTERFAZ
 # ==============================
-query_params = st.query_params
 if "page" not in st.session_state:
-    st.session_state.page = query_params.get("page", ["ingresar"])[0]
+    st.session_state.page = st.query_params.get("page", ["ingresar"])[0]
 
-def set_page(p):
-    st.session_state.page = p
-    st.query_params["page"] = p
+def set_page(page_name: str):
+    st.session_state.page = page_name
+    st.query_params["page"] = page_name
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -192,7 +214,7 @@ with col3:
     if st.button("🗃️ DATOS"):
         set_page("datos")
 
-bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}[st.session_state.page]
+bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}.get(st.session_state.page, "#F2F4F4")
 st.markdown(f"<style>.stApp{{background-color:{bg};}}</style>", unsafe_allow_html=True)
 st.header(
     "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
@@ -200,44 +222,38 @@ st.header(
 )
 
 # ==============================
-# SECCIONES
+# ESCANEO Y LOG
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
-    auto_scan = st.checkbox("Escaneo automático", value=False)
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
         process_scan(scan_val.strip())
 
-    # ----- LOG -----
     st.subheader("Registro de escaneos (últimos 60 días)")
     df = pd.DataFrame(get_logs(st.session_state.page))
     if not df.empty:
         visible_cols = [
-            "asignacion", "guia",
-            "fecha_ingreso", "fecha_impresion",
-            "estado_escaneo", "estado_orden", "estado_envio",
-            "archivo_adjunto", "comentario", "titulo", "asin"
+            "asignacion","guia","fecha_ingreso","fecha_impresion",
+            "estado_escaneo","estado_orden","estado_envio",
+            "archivo_adjunto","comentario","titulo","asin"
         ]
         df = df[[c for c in visible_cols if c in df.columns]]
 
-        def make_button(url, asignacion):
-            if url_disponible(url):
-                link = build_download_url(url, asignacion)
-                return f'<a href="{link}" download><button>Descargar</button></a>'
-            return "No disponible"
-
         if "archivo_adjunto" in df.columns:
             df["archivo_adjunto"] = df.apply(
-                lambda r: make_button(r["archivo_adjunto"], r.get("asignacion", "")),
+                lambda r: (
+                    f'<a href="{build_download_url(r["archivo_adjunto"], r["asignacion"])}" download>'
+                    '<button>Descargar</button></a>'
+                    if url_disponible(r["archivo_adjunto"]) else "No disponible"
+                ),
                 axis=1
             )
-
         st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
     else:
         st.info("No hay registros aún.")
 
 # ==============================
-# PÁGINA DATOS (solo lectura estable)
+# PÁGINA DATOS (CRUD)
 # ==============================
 if st.session_state.page == "datos":
     st.markdown("### Base de datos completa")
