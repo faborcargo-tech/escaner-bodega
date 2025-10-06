@@ -7,8 +7,9 @@ import requests
 import time
 
 # ==============================
-# ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL
-# Corrige errores de conexión y mantiene las variables globales unificadas.
+# ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
+# - Centraliza URL/KEY de Supabase y parámetros base.
+# - Evita errores de inicialización y mantiene timezone consistente.
 # ==============================
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
@@ -20,9 +21,11 @@ TABLE_NAME = "paquetes_mercadoenvios_chile"
 STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
+
 # ==============================
-# ✅ BLOQUE ESTABLE — FUNCIONES DE STORAGE
-# Corrige errores de subida duplicada y fuerza tipo MIME application/pdf.
+# ✅ BLOQUE ESTABLE — STORAGE (NO MODIFICAR)
+# - Sube/reemplaza PDFs con upsert.
+# - Fuerza MIME application/pdf para evitar que el navegador muestre "código".
 # ==============================
 def _get_public_or_signed_url(path: str) -> str | None:
     try:
@@ -35,34 +38,24 @@ def _get_public_or_signed_url(path: str) -> str | None:
 
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
-    """Sube o reemplaza un PDF en el bucket 'etiquetas/<asignacion>.pdf'"""
+    """Sube/reemplaza PDF como etiquetas/<asignacion>.pdf y retorna su URL pública."""
     if not asignacion or uploaded_file is None:
         return None
-
     key_path = f"{asignacion}.pdf"
     file_bytes = uploaded_file.read()
-
     try:
-        # Subida con overwrite habilitado (upsert=True) para reemplazar si ya existe
-        supabase.storage.from_(STORAGE_BUCKET).upload(
-            key_path, file_bytes, {"upsert": "true"}
-        )
+        # upsert para evitar error de duplicado
+        supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes, {"upsert": "true"})
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # Forzar tipo MIME a PDF
+    # Forzar MIME application/pdf para descargas correctas
     try:
-        headers = {
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY,
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "apikey": SUPABASE_KEY, "Content-Type": "application/json"}
         requests.patch(
             f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}",
-            headers=headers,
-            json={"contentType": "application/pdf"},
-            timeout=5,
+            headers=headers, json={"contentType": "application/pdf"}, timeout=5
         )
     except Exception:
         pass
@@ -70,20 +63,8 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     return _get_public_or_signed_url(key_path)
 
 
-def build_download_url(public_url: str, asignacion: str | None = None) -> str:
-    """Convierte enlace público a formato 'download' para que no abra en navegador"""
-    if not public_url:
-        return ""
-    if "/object/public/" in public_url:
-        tail = public_url.split("/object/public/", 1)[1]
-        return f"{SUPABASE_URL}/storage/v1/object/public/{tail}"
-    if asignacion:
-        return f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{asignacion}.pdf"
-    return public_url
-
-
 def url_disponible(url: str) -> bool:
-    """Verifica si un archivo sigue existiendo en el bucket"""
+    """HEAD 200 OK -> existe."""
     if not url:
         return False
     try:
@@ -94,8 +75,9 @@ def url_disponible(url: str) -> bool:
 
 
 # ==============================
-# ✅ BLOQUE ESTABLE — FUNCIONES DE BASE DE DATOS
-# Corrige inserciones duplicadas y mantiene consistencia de fechas.
+# ✅ BLOQUE ESTABLE — DB HELPERS (NO MODIFICAR)
+# - Operaciones atómicas de lectura/actualización.
+# - Inserta NO COINCIDENTE si la guía no existe.
 # ==============================
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -104,55 +86,52 @@ def lookup_by_guia(guia: str):
 
 def update_ingreso(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).update(
-        {"fecha_ingreso": now.isoformat(), "estado_escaneo": "INGRESADO CORRECTAMENTE!"}
-    ).eq("guia", guia).execute()
+    supabase.table(TABLE_NAME).update({
+        "fecha_ingreso": now.isoformat(),
+        "estado_escaneo": "INGRESADO CORRECTAMENTE!"
+    }).eq("guia", guia).execute()
 
 
 def update_impresion(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).update(
-        {"fecha_impresion": now.isoformat(), "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"}
-    ).eq("guia", guia).execute()
+    supabase.table(TABLE_NAME).update({
+        "fecha_impresion": now.isoformat(),
+        "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"
+    }).eq("guia", guia).execute()
 
 
 def insert_no_coincidente(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).insert(
-        {
-            "asignacion": "",
-            "guia": guia,
-            "fecha_ingreso": now.isoformat(),
-            "estado_escaneo": "NO COINCIDENTE!",
-            "asin": "",
-            "cantidad": 0,
-            "estado_orden": "",
-            "estado_envio": "",
-            "archivo_adjunto": "",
-            "url_imagen": "",
-            "comentario": "",
-            "descripcion": "",
-            "titulo": "",
-        }
-    ).execute()
+    supabase.table(TABLE_NAME).insert({
+        "asignacion": "",
+        "guia": guia,
+        "fecha_ingreso": now.isoformat(),
+        "estado_escaneo": "NO COINCIDENTE!",
+        "asin": "",
+        "cantidad": 0,
+        "estado_orden": "",
+        "estado_envio": "",
+        "archivo_adjunto": "",
+        "url_imagen": "",
+        "comentario": "",
+        "descripcion": "",
+        "titulo": ""
+    }).execute()
 
 
 def get_logs(page: str):
+    """Devuelve últimos 60 días de acuerdo a la sección (ingreso/impresión)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
     field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
-    res = (
-        supabase.table(TABLE_NAME)
-        .select("*")
-        .gte(field, cutoff)
-        .order(field, desc=True)
-        .execute()
-    )
+    res = supabase.table(TABLE_NAME).select("*").gte(field, cutoff).order(field, desc=True).execute()
     return res.data or []
 
 
 # ==============================
-# ✅ BLOQUE ESTABLE — ESCANEO Y DESCARGA
-# Corrige: corrupción de PDF, descargas fallidas y registro de logs duplicados.
+# ✅ BLOQUE ESTABLE — ESCANEO (NO AUTO-ABRIR PDF) (NO MODIFICAR)
+# - Punto 3: elimina intento de auto-abrir PDF.
+# - Mantiene botón "Descargar nuevamente ..." que funciona perfecto.
+# - Inserta un nuevo registro de impresión (log persistente).
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -161,77 +140,163 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
         return
 
+    # MODO INGRESAR
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
-        st.success(f"📦 Guía {guia} ingresada correctamente")
+        st.success(f"📦 Guía {guia} ingresada correctamente.")
         return
 
+    # MODO IMPRIMIR (sin auto-abrir PDF)
     if st.session_state.page == "imprimir":
         update_impresion(guia)
+
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
-        if archivo_public:
-            download_url = build_download_url(archivo_public, asignacion)
-            st.success(f"🖨️ Etiqueta {asignacion} disponible, descargando...")
-
-            # Forzar descarga con JavaScript (no abre el PDF en navegador)
-            js = f"""
-            <script>
-            const link = document.createElement('a');
-            link.href = '{download_url}';
-            link.download = '{asignacion}.pdf';
-            link.target = '_blank';
-            link.click();
-            </script>
-            """
-            st.components.v1.html(js, height=0)
-
-            # Botón de descarga adicional (funciona correctamente, no corrompe PDF)
-            st.download_button(
-                label=f"📄 Descargar nuevamente {asignacion}.pdf",
-                data=requests.get(download_url).content,
-                file_name=f"{asignacion}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
+        # 1) Mostrar botón de descarga confiable (funciona bien)
+        if archivo_public and url_disponible(archivo_public):
+            try:
+                pdf_bytes = requests.get(archivo_public, timeout=10).content
+                # Validar encabezado PDF
+                if pdf_bytes[:4] == b"%PDF":
+                    st.success(f"🖨️ Etiqueta {asignacion} lista.")
+                    st.download_button(
+                        label=f"📄 Descargar nuevamente {asignacion}.pdf",
+                        data=pdf_bytes,
+                        file_name=f"{asignacion}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("⚠️ El archivo no parece un PDF válido.")
+            except Exception:
+                st.warning("⚠️ No se pudo descargar el PDF desde Supabase.")
         else:
-            st.warning("⚠️ Etiqueta no disponible para esta guía.")
+            st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
+
+        # 2) Insertar un NUEVO registro para el log de impresión (aunque se repita)
+        try:
+            now = datetime.now(TZ).isoformat()
+            supabase.table(TABLE_NAME).insert({
+                "asignacion": asignacion,
+                "guia": guia,
+                "fecha_impresion": now,
+                "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!",
+                "estado_orden": match.get("estado_orden"),
+                "estado_envio": match.get("estado_envio"),
+                "archivo_adjunto": archivo_public,
+                "comentario": match.get("comentario"),
+                "titulo": match.get("titulo"),
+                "asin": match.get("asin"),
+                "cantidad": match.get("cantidad"),
+                "orden_meli": match.get("orden_meli"),
+                "pack_id": match.get("pack_id"),
+            }).execute()
+        except Exception:
+            # RLS estricta: si falla inserción del log, no rompe el flujo.
+            pass
 
 
 # ==============================
-# ✅ BLOQUE ESTABLE — INTERFAZ PRINCIPAL Y NAVEGACIÓN
-# Corrige: pérdida de estado al actualizar y errores KeyError en st.session_state.
+# ✅ BLOQUE ESTABLE — PERSISTENCIA DE SECCIÓN (NO MODIFICAR)
+# - Punto 2: cada sección usa ?page=... en la URL.
+# - Al refrescar, NO cambia de sección.
 # ==============================
+def _get_page_param_default() -> str:
+    try:
+        qp = st.query_params
+        return qp.get("page", ["ingresar"])[0]
+    except Exception:
+        qp = st.experimental_get_query_params()
+        return qp.get("page", ["ingresar"])[0]
+
+def _set_page_param(p: str):
+    try:
+        st.query_params["page"] = p
+    except Exception:
+        st.experimental_set_query_params(page=p)
+
 if "page" not in st.session_state:
-    st.session_state.page = "ingresar"
+    st.session_state.page = _get_page_param_default()
 
-# Menú superior persistente
+def set_page(p: str):
+    st.session_state.page = p
+    _set_page_param(p)
+
+
+# ==============================
+# ✅ BLOQUE ESTABLE — UI PRINCIPAL (NO MODIFICAR)
+# - Mantiene estilos por sección.
+# ==============================
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("INGRESAR PAQUETES"):
-        st.session_state.page = "ingresar"
+        set_page("ingresar")
 with col2:
     if st.button("IMPRIMIR GUIAS"):
-        st.session_state.page = "imprimir"
+        set_page("imprimir")
 with col3:
     if st.button("🗃️ DATOS"):
-        st.session_state.page = "datos"
+        set_page("datos")
 
-bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}.get(
-    st.session_state.page, "#F2F4F4"
-)
+bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}.get(st.session_state.page, "#F2F4F4")
 st.markdown(f"<style>.stApp{{background-color:{bg};}}</style>", unsafe_allow_html=True)
 
 st.header(
-    "📦 INGRESAR PAQUETES"
-    if st.session_state.page == "ingresar"
+    "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
+
 # ==============================
-# ✅ BLOQUE ESTABLE — SECCIONES INGRESAR / IMPRIMIR
-# Corrige: tabla con enlaces no funcionales, agrega validación de URL antes de mostrar.
+# ✅ BLOQUE ESTABLE — LOG DE ESCANEOS (NO MODIFICAR)
+# - Punto 5: el “botón” dentro de la columna ARCHIVO_ADJUNTO descarga igual que el botón principal.
+# - Para lograrlo sin corromper PDFs, renderizamos cada fila con botón Streamlit.
+# - Se mantiene una fila “tipo tabla” con columnas clave.
+# ==============================
+def render_log_with_download_buttons(rows: list, page: str):
+    if not rows:
+        st.info("No hay registros aún.")
+        return
+    # Encabezado
+    if page == "imprimir":
+        cols = ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
+    else:
+        cols = ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
+    hc = st.columns([2, 2, 2, 2, 1])
+    for i, h in enumerate(cols):
+        hc[i].markdown(f"**{h}**")
+
+    # Filas
+    for r in rows:
+        asign = r.get("asignacion", "")
+        guia = r.get("guia", "")
+        fecha = r.get("fecha_impresion") if page == "imprimir" else r.get("fecha_ingreso")
+        estado = r.get("estado_escaneo", "")
+        url = r.get("archivo_adjunto", "")
+        c = st.columns([2, 2, 2, 2, 1])
+        c[0].write(asign or "-")
+        c[1].write(guia or "-")
+        c[2].write((str(fecha)[:19]) if fecha else "-")
+        c[3].write(estado or "-")
+
+        if url and url_disponible(url):
+            try:
+                pdf_bytes = requests.get(url, timeout=8).content
+                if pdf_bytes[:4] == b"%PDF":
+                    c[4].download_button(
+                        "⇩", data=pdf_bytes, file_name=f"{(asign or 'etiqueta')}.pdf", mime="application/pdf", key=f"dl_{asign}_{guia}_{time.time()}"
+                    )
+                else:
+                    c[4].write("No válido")
+            except Exception:
+                c[4].write("No disponible")
+        else:
+            c[4].write("No disponible")
+
+
+# ==============================
+# SECCIONES INGRESAR / IMPRIMIR
 # ==============================
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
@@ -239,54 +304,250 @@ if st.session_state.page in ("ingresar", "imprimir"):
         process_scan(scan_val.strip())
 
     st.subheader("Registro de escaneos (últimos 60 días)")
-    df = pd.DataFrame(get_logs(st.session_state.page))
-    if not df.empty:
-        visible_cols = [
-            "asignacion",
-            "guia",
-            "fecha_ingreso",
-            "fecha_impresion",
-            "estado_escaneo",
-            "estado_orden",
-            "estado_envio",
-            "archivo_adjunto",
-            "comentario",
-            "titulo",
-            "asin",
-        ]
-        df = df[[c for c in visible_cols if c in df.columns]]
-        if "archivo_adjunto" in df.columns:
-            df["archivo_adjunto"] = df.apply(
-                lambda r: (
-                    f'<a href="{build_download_url(r["archivo_adjunto"],r["asignacion"])}" download>'
-                    '<button>Descargar</button></a>'
-                    if url_disponible(r["archivo_adjunto"])
-                    else "No disponible"
-                ),
-                axis=1,
-            )
-        st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
-    else:
-        st.info("No hay registros aún.")
+    rows = get_logs(st.session_state.page)
+    render_log_with_download_buttons(rows, st.session_state.page)
+
 
 # ==============================
-# ✅ BLOQUE ESTABLE — PÁGINA DE DATOS (CRUD)
-# Corrige: errores de paginación, pérdida de búsqueda y estabilidad al editar.
+# CRUD — PÁGINA DATOS
+# - Punto 1: vuelve el botón “➕ Nuevo registro”.
+# - Punto 6: columna “Editar” usa ButtonColumn (no checkbox) y abre el formulario.
+# - Punto 7: checkbox “Solo sin guía”.
 # ==============================
-if st.session_state.page == "datos":
-    st.markdown("### Base de datos completa")
+ALL_COLUMNS = [
+    "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
+    "asin", "cantidad", "estado_orden", "estado_envio",
+    "archivo_adjunto", "url_imagen", "comentario", "descripcion",
+    "fecha_impresion", "titulo", "orden_meli", "pack_id"
+]
+REQUIRED_FIELDS = ["asignacion", "orden_meli"]
+LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]
 
-    search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)")
-    page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
+def datos_defaults():
+    return dict(
+        id=None, asignacion="", guia="", fecha_ingreso=None, estado_escaneo="",
+        asin="", cantidad=1, estado_orden="", estado_envio="",
+        archivo_adjunto="", url_imagen="", comentario="", descripcion="",
+        fecha_impresion=None, titulo="", orden_meli="", pack_id=""
+    )
 
+def datos_fetch(limit=200, offset=0, search: str = ""):
     q = supabase.table(TABLE_NAME).select("*").order("id", desc=True)
     if search:
         q = q.or_(
             f"asignacion.ilike.%{search}%,guia.ilike.%{search}%,orden_meli.ilike.%{search}%,pack_id.ilike.%{search}%,titulo.ilike.%{search}%"
         )
-    data = q.limit(page_size).execute().data or []
+    return q.range(offset, offset + limit - 1).execute().data or []
 
-    if not data:
+def datos_find_duplicates(asignacion, orden_meli, pack_id):
+    seen = {}
+    for field, value in [("asignacion", asignacion), ("orden_meli", orden_meli), ("pack_id", pack_id)]:
+        if value:
+            res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq(field, value).limit(50).execute()
+            for r in (res.data or []): seen[r["id"]] = r
+    return list(seen.values())
+
+def datos_insert(payload: dict):
+    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k != "id"}
+    return supabase.table(TABLE_NAME).insert(clean).execute()
+
+def datos_update(id_val: int, payload: dict):
+    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
+    if not clean:
+        return None
+    return supabase.table(TABLE_NAME).update(clean).eq("id", id_val).execute()
+
+# ---- Estado modal
+if "datos_modal_open" not in st.session_state:
+    st.session_state.datos_modal_open = False
+if "datos_modal_mode" not in st.session_state:
+    st.session_state.datos_modal_mode = "new"
+if "datos_modal_row" not in st.session_state:
+    st.session_state.datos_modal_row = datos_defaults()
+if "datos_offset" not in st.session_state:
+    st.session_state.datos_offset = 0
+
+def open_modal_new():
+    st.session_state.datos_modal_mode = "new"
+    st.session_state.datos_modal_row = datos_defaults()
+    st.session_state.datos_modal_open = True
+
+def open_modal_edit(row: dict):
+    base = datos_defaults()
+    base.update({k: row.get(k) for k in row.keys()})
+    st.session_state.datos_modal_row = base
+    st.session_state.datos_modal_mode = "edit"
+    st.session_state.datos_modal_open = True
+
+def close_modal():
+    st.session_state.datos_modal_open = False
+
+def _render_form_contents():
+    mode = st.session_state.datos_modal_mode
+    data = st.session_state.datos_modal_row.copy()
+
+    st.write("**Modo:** ", "Crear nuevo" if mode == "new" else f"Editar ID {data.get('id')}")
+    colA, colB, colC = st.columns(3)
+
+    if mode == "edit":
+        data["asignacion"] = colA.text_input("asignacion", value=data.get("asignacion") or "", disabled=True)
+        data["orden_meli"] = colB.text_input("orden_meli", value=data.get("orden_meli") or "", disabled=True)
+    else:
+        data["asignacion"] = colA.text_input("asignacion *", value=data.get("asignacion") or "")
+        data["orden_meli"] = colB.text_input("orden_meli *", value=data.get("orden_meli") or "")
+    data["pack_id"] = colC.text_input("pack_id (opcional)", value=(data.get("pack_id") or ""))
+
+    col1, col2, col3 = st.columns(3)
+    data["guia"]   = col1.text_input("guia", value=(data.get("guia") or ""))
+    data["titulo"] = col2.text_input("titulo", value=(data.get("titulo") or ""))
+    data["asin"]   = col3.text_input("asin", value=(data.get("asin") or ""))
+
+    col4, col5, col6 = st.columns(3)
+    data["cantidad"]     = col4.number_input("cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1)
+    data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
+    data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
+
+    # PDF actual (si existe)
+    current_pdf = data.get("archivo_adjunto") or ""
+    if current_pdf:
+        st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
+
+    data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=current_pdf)
+    data["url_imagen"]      = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
+    data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
+    data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
+
+    st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
+    pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
+
+    col_btn1, col_btn2 = st.columns([1,1])
+    submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
+    cancel    = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
+
+    if cancel:
+        close_modal()
+        st.rerun()
+
+    if submitted:
+        # Subir/reemplazar PDF si corresponde
+        if pdf_file is not None:
+            asign = (data.get("asignacion") or "").strip()
+            if not asign:
+                st.error("Debes completar 'asignacion' para subir el PDF.")
+                return
+            url_pdf = upload_pdf_to_storage(asign, pdf_file)
+            if url_pdf:
+                data["archivo_adjunto"] = url_pdf
+
+        if mode == "new":
+            missing = [f for f in REQUIRED_FIELDS if not str(data.get(f, "")).strip()]
+            if missing:
+                st.error(f"Faltan campos obligatorios: {', '.join(missing)}")
+                return
+            dups = datos_find_duplicates(data["asignacion"].strip(), data["orden_meli"].strip(), (data.get("pack_id") or "").strip())
+            if dups:
+                st.warning("⚠️ Existen registros coincidentes:")
+                st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
+                if st.checkbox("Forzar inserción", key="force_insert"):
+                    datos_insert(data)
+                    st.success("Registro insertado (forzado).")
+                    close_modal()
+                    st.rerun()
+            else:
+                datos_insert(data)
+                st.success("Registro insertado correctamente.")
+                close_modal()
+                st.rerun()
+        else:
+            rid = int(data["id"])
+            datos_update(rid, data)
+            st.success(f"Registro {rid} actualizado.")
+            close_modal()
+            st.rerun()
+
+def render_modal_if_needed():
+    if not st.session_state.datos_modal_open:
+        return
+    if hasattr(st, "dialog"):
+        @st.dialog("Formulario de registro")
+        def _show_dialog():
+            _render_form_contents()
+        _show_dialog()
+    else:
+        with st.expander("Formulario de registro", expanded=True):
+            _render_form_contents()
+
+# ---- Página DATOS
+if st.session_state.page == "datos":
+    st.markdown("### Base de datos")
+
+    colf1, colf2, colf4 = st.columns([2,1,1])
+    with colf1:
+        search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
+    with colf2:
+        page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
+    with colf4:
+        # Punto 1: Botón "Nuevo registro" restaurado
+        if st.button("➕ Nuevo registro", use_container_width=True):
+            open_modal_new()
+
+    # Paginación simple
+    colp1, colp2, colp3 = st.columns([1,1,6])
+    with colp1:
+        if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
+            st.session_state.datos_offset -= page_size
+    with colp2:
+        if st.button("Siguiente ⟶"):
+            st.session_state.datos_offset += page_size
+
+    data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
+    df_all = pd.DataFrame(data_rows)
+
+    # Punto 7: Filtro "Solo sin guía"
+    solo_sin_guia = st.checkbox("Solo sin guía", value=False)
+    if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
+        df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
+
+    if df_all.empty:
         st.info("Sin registros para mostrar.")
     else:
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
+        show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
+        df_all = df_all.copy()
+
+        # Punto 6: Columna EDITAR con ButtonColumn (sin checkbox)
+        df_all["Editar"] = False
+        has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
+        if has_button_col:
+            column_config = {
+                "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
+            }
+        else:
+            # Fallback si la versión no soporta ButtonColumn
+            column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Editar fila", default=False)}
+
+        ordered_cols = ["Editar"] + show_cols
+
+        edited_df = st.data_editor(
+            df_all[ordered_cols],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            disabled=show_cols,   # no permitir edición inline; usar modal
+            column_config=column_config
+        )
+
+        # Detectar fila solicitada para editar
+        try:
+            if "Editar" in edited_df.columns:
+                # tanto para ButtonColumn (True en la fila clickeada)
+                # como para Checkbox fallback
+                clicked = edited_df.index[edited_df["Editar"] == True].tolist()
+                if clicked:
+                    idx = clicked[0]
+                    row_dict = edited_df.loc[idx].to_dict()
+                    row_dict.pop("Editar", None)
+                    open_modal_edit(row_dict)
+        except Exception:
+            pass
+
+    render_modal_if_needed()
