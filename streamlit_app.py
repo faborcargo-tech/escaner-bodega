@@ -5,14 +5,17 @@ from datetime import datetime, timedelta
 import pytz
 import requests
 import time
-
-# --- MERCADO LIBRE: helpers mínimos para OAuth + etiqueta ---
 from typing import Optional
-import json, secrets as pysecrets
+import json
+import secrets as pysecrets
+
+# ============================================================
+# MERCADO LIBRE — helpers OAuth + descarga de etiqueta PDF
+# ============================================================
 
 MELI_API_BASE = "https://api.mercadolibre.com"
 
-def _build_auth_url(client_id: str, redirect_uri: str, state: str, scopes: list[str] = None) -> str:
+def _build_auth_url(client_id: str, redirect_uri: str, state: str, scopes: list[str] | None = None) -> str:
     scopes = scopes or ["offline_access", "read", "write"]
     scope_str = "%20".join(scopes)
     return (
@@ -112,7 +115,7 @@ def _meli_get_access_token() -> Optional[str]:
         at = j.get("access_token")
         exp = int(j.get("expires_in", 3600))
         st.session_state["meli_rt_cache"] = {"access_token": at, "exp": now + exp}
-        # Avisar si ML rotó el refresh_token (para que lo actualices en Secrets)
+        # Aviso si ML rotó el refresh_token (actualízalo en Secrets para persistirlo)
         new_rt = j.get("refresh_token")
         if new_rt and new_rt != MELI_REFRESH_TOKEN:
             st.info("ℹ️ Mercado Libre emitió un refresh_token nuevo. Actualízalo en Secrets para persistirlo.")
@@ -122,7 +125,7 @@ def _meli_get_access_token() -> Optional[str]:
 
 def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
     """Intenta descargar la etiqueta desde ML usando orden_meli; si falla, usa archivo_adjunto."""
-    # 1) Mercado Libre (si hay orden_meli y secrets)
+    # 1) Mercado Libre
     order_id = (match.get("orden_meli") or "").strip()
     if order_id:
         token = _meli_get_access_token()
@@ -132,7 +135,7 @@ def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
                 pdf = _meli_download_label_pdf(sid, token)
                 if pdf:
                     return pdf
-    # 2) Respaldo: URL pública en Supabase (archivo_adjunto)
+    # 2) Respaldo (Supabase storage URL)
     archivo_public = match.get("archivo_adjunto") or ""
     if archivo_public and url_disponible(archivo_public):
         try:
@@ -143,9 +146,9 @@ def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
             pass
     return None
 
-# ==============================
-# ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
-# ==============================
+# ============================================================
+# CONFIGURACIÓN GENERAL (NO MODIFICAR)
+# ============================================================
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -156,9 +159,9 @@ TABLE_NAME = "paquetes_mercadoenvios_chile"
 STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
-# ==============================
-# ✅ BLOQUE ESTABLE — STORAGE (NO MODIFICAR)
-# ==============================
+# ============================================================
+# STORAGE (NO MODIFICAR)
+# ============================================================
 def _get_public_or_signed_url(path: str) -> str | None:
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
@@ -175,13 +178,12 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     key_path = f"{asignacion}.pdf"
     file_bytes = uploaded_file.read()
     try:
-        # upsert para evitar error de duplicado
         supabase.storage.from_(STORAGE_BUCKET).upload(key_path, file_bytes, {"upsert": "true"})
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
 
-    # Forzar MIME application/pdf para descargas correctas
+    # Forzar MIME application/pdf
     try:
         headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "apikey": SUPABASE_KEY, "Content-Type": "application/json"}
         requests.patch(
@@ -194,7 +196,6 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     return _get_public_or_signed_url(key_path)
 
 def url_disponible(url: str) -> bool:
-    """HEAD 200 OK -> existe."""
     if not url:
         return False
     try:
@@ -203,9 +204,9 @@ def url_disponible(url: str) -> bool:
     except Exception:
         return False
 
-# ==============================
-# ✅ BLOQUE ESTABLE — DB HELPERS (NO MODIFICAR)
-# ==============================
+# ============================================================
+# DB HELPERS (NO MODIFICAR)
+# ============================================================
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return res.data[0] if res.data else None
@@ -243,15 +244,14 @@ def insert_no_coincidente(guia: str):
     }).execute()
 
 def get_logs(page: str):
-    """Devuelve últimos 60 días de acuerdo a la sección (ingreso/impresión)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
     field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
     res = supabase.table(TABLE_NAME).select("*").gte(field, cutoff).order(field, desc=True).execute()
     return res.data or []
 
-# ==============================
-# ✅ BLOQUE ESTABLE — ESCANEO (NO AUTO-ABRIR PDF)
-# ==============================
+# ============================================================
+# ESCANEO (NO AUTO-ABRIR PDF)
+# ============================================================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
     if not match:
@@ -265,15 +265,15 @@ def process_scan(guia: str):
         st.success(f"📦 Guía {guia} ingresada correctamente.")
         return
 
-    # MODO IMPRIMIR (prioriza Mercado Libre; cae a respaldo)
+    # MODO IMPRIMIR
     if st.session_state.page == "imprimir":
         update_impresion(guia)
 
         asignacion = (match.get("asignacion") or "etiqueta").strip()
         archivo_public = match.get("archivo_adjunto") or ""
 
-        # 1) Intentar con Mercado Libre (auto-refresh) y caer a respaldo
-        pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh; si falla, usa archivo_adjunto
+        # Intentar etiqueta desde ML (auto-refresh) y caer a respaldo
+        pdf_bytes = _obtener_pdf_etiqueta(match)
 
         if pdf_bytes and pdf_bytes[:4] == b"%PDF":
             st.success(f"🖨️ Etiqueta {asignacion} lista (prioridad Mercado Libre).")
@@ -287,7 +287,7 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ No se pudo obtener la etiqueta desde Mercado Libre ni desde el respaldo.")
 
-        # 2) Insertar un NUEVO registro para el log de impresión (aunque se repita)
+        # Log de impresión
         try:
             now = datetime.now(TZ).isoformat()
             supabase.table(TABLE_NAME).insert({
@@ -306,12 +306,11 @@ def process_scan(guia: str):
                 "pack_id": match.get("pack_id"),
             }).execute()
         except Exception:
-            # RLS estricta: si falla inserción del log, no rompe el flujo.
             pass
 
-# ==============================
-# ✅ BLOQUE ESTABLE — PERSISTENCIA DE SECCIÓN (NO MODIFICAR)
-# ==============================
+# ============================================================
+# PERSISTENCIA DE SECCIÓN (NO MODIFICAR)
+# ============================================================
 def _get_page_param_default() -> str:
     try:
         qp = st.query_params
@@ -333,9 +332,9 @@ def set_page(p: str):
     st.session_state.page = p
     _set_page_param(p)
 
-# ==============================
-# ✅ BLOQUE ESTABLE — UI PRINCIPAL (NO MODIFICAR)
-# ==============================
+# ============================================================
+# UI PRINCIPAL (NO MODIFICAR)
+# ============================================================
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("INGRESAR PAQUETES"):
@@ -355,9 +354,9 @@ st.header(
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
-# ==============================
-# ✅ BLOQUE ESTABLE — LOG DE ESCANEOS (NO MODIFICAR)
-# ==============================
+# ============================================================
+# LOG DE ESCANEOS (NO MODIFICAR)
+# ============================================================
 def render_log_with_download_buttons(rows: list, page: str):
     if not rows:
         st.info("No hay registros aún.")
@@ -389,7 +388,11 @@ def render_log_with_download_buttons(rows: list, page: str):
                 pdf_bytes = requests.get(url, timeout=8).content
                 if pdf_bytes[:4] == b"%PDF":
                     c[4].download_button(
-                        "⇩", data=pdf_bytes, file_name=f"{(asign or 'etiqueta')}.pdf", mime="application/pdf", key=f"dl_{asign}_{guia}_{time.time()}"
+                        "⇩",
+                        data=pdf_bytes,
+                        file_name=f"{(asign or 'etiqueta')}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_{asign}_{guia}_{time.time()}",
                     )
                 else:
                     c[4].write("No válido")
@@ -398,9 +401,9 @@ def render_log_with_download_buttons(rows: list, page: str):
         else:
             c[4].write("No disponible")
 
-# ==============================
+# ============================================================
 # SECCIONES INGRESAR / IMPRIMIR
-# ==============================
+# ============================================================
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
@@ -410,9 +413,9 @@ if st.session_state.page in ("ingresar", "imprimir"):
     rows = get_logs(st.session_state.page)
     render_log_with_download_buttons(rows, st.session_state.page)
 
-# ==============================
+# ============================================================
 # CRUD — PÁGINA DATOS
-# ==============================
+# ============================================================
 ALL_COLUMNS = [
     "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
     "asin", "cantidad", "estado_orden", "estado_envio",
@@ -443,7 +446,8 @@ def datos_find_duplicates(asignacion, orden_meli, pack_id):
     for field, value in [("asignacion", asignacion), ("orden_meli", orden_meli), ("pack_id", pack_id)]:
         if value:
             res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq(field, value).limit(50).execute()
-            for r in (res.data or []): seen[r["id"]] = r
+            for r in (res.data or []):
+                seen[r["id"]] = r
     return list(seen.values())
 
 def datos_insert(payload: dict):
@@ -528,7 +532,6 @@ def _render_form_contents():
         st.rerun()
 
     if submitted:
-        # Subir/reemplazar PDF si corresponde
         if pdf_file is not None:
             asign = (data.get("asignacion") or "").strip()
             if not asign:
@@ -586,13 +589,13 @@ if st.session_state.page == "datos":
     with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_state["meli_open"]):
         st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; puedes descargar un JSON con los tokens.")
 
-        # --- Credenciales (desde secrets, editables) ---
+        # Credenciales (desde secrets)
         colA, colB = st.columns(2)
         client_id = colA.text_input("Client ID", value=st.secrets.get("MELI_CLIENT_ID", ""))
         client_secret = colB.text_input("Client Secret", type="password", value=st.secrets.get("MELI_CLIENT_SECRET", ""))
         redirect_uri = st.text_input("Redirect URI", value=st.secrets.get("MELI_REDIRECT_URI", ""))
 
-        # --- STATE anti-CSRF FIJADO EN LA URL ---
+        # STATE anti-CSRF atado a URL
         try:
             _qp = st.query_params
         except Exception:
@@ -609,10 +612,10 @@ if st.session_state.page == "datos":
                 except Exception:
                     st.experimental_set_query_params(**{**_qp, "meli_state": st.session_state.meli_oauth_state})
 
-        # --- Link de autorización ---
+        # Link de autorización
         if client_id and redirect_uri:
             auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
-            st.session_state["meli_open"] = True  # mantener abierto
+            st.session_state["meli_open"] = True
             if hasattr(st, "link_button"):
                 st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
             else:
@@ -620,7 +623,7 @@ if st.session_state.page == "datos":
 
         st.divider()
 
-        # --- Capturar ?code y ?state devueltos por ML ---
+        # Capturar ?code y ?state devueltos por ML
         try:
             _qp = st.query_params
         except Exception:
@@ -632,13 +635,13 @@ if st.session_state.page == "datos":
         code_in = colC.text_input("Code (si no volvió automático, pégalo aquí)", value=_code)
         state_in = colD.text_input("State recibido", value=_state)
 
-        # --- Forzar state si acabo de autorizar (bypass seguro) ---
+        # Forzar state si acabo de autorizar
         forzar_state = st.checkbox("Confirmo que acabo de autorizar y quiero forzar el state")
 
-        # --- Obtener tokens (code -> access/refresh) ---
+        # Obtener tokens (code -> access/refresh)
         if st.button("🔄 Obtener tokens", use_container_width=True,
                      disabled=not (client_id and client_secret and redirect_uri and code_in)):
-            st.session_state["meli_open"] = True  # mantener el expander abierto
+            st.session_state["meli_open"] = True
 
             if (not forzar_state) and state_in and state_in != st.session_state.meli_oauth_state:
                 st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
@@ -650,36 +653,35 @@ if st.session_state.page == "datos":
                 if tokens:
                     st.session_state.meli_tokens = tokens
                     st.success("✅ Tokens obtenidos.")
-                    st.json(tokens)  # verás refresh_token en la respuesta
+                    st.json(tokens)
 
-    # --- Mostrar tokens (si disponibles) ---
-tokens = st.session_state.get("meli_tokens") or {}
-access_token_val = tokens.get("access_token", "")
-refresh_token_val = tokens.get("refresh_token", "")
-user_id_val = tokens.get("user_id")
+        # --- Mostrar tokens (si hay) ---
+        tokens = st.session_state.get("meli_tokens") or {}
+        access_token_val = tokens.get("access_token", "")
+        refresh_token_val = tokens.get("refresh_token", "")
+        user_id_val = tokens.get("user_id")
 
-if access_token_val or refresh_token_val:
-    st.write("**user_id:**", user_id_val)
-    st.text_area("access_token", value=access_token_val, height=90)
-    st.text_input("refresh_token (guárdalo en Secrets)", value=refresh_token_val)
+        if access_token_val or refresh_token_val:
+            st.write("**user_id:**", user_id_val)
+            st.text_area("access_token", value=access_token_val, height=90)
+            st.text_input("refresh_token (guárdalo en Secrets)", value=refresh_token_val)
 
-    # (Opcional) Descargar tokens como JSON
-    buf = json.dumps({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": redirect_uri,
-        "access_token": access_token_val,
-        "refresh_token": refresh_token_val,
-        "user_id": user_id_val,
-        "obtained_at": datetime.now(TZ).isoformat(),
-    }, ensure_ascii=False, indent=2).encode("utf-8")
-    st.download_button(
-        "💾 Descargar meli_tokens.json",
-        data=buf,
-        file_name="meli_tokens.json",
-        mime="application/json",
-        use_container_width=True
-    )
+            buf = json.dumps({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "access_token": access_token_val,
+                "refresh_token": refresh_token_val,
+                "user_id": user_id_val,
+                "obtained_at": datetime.now(TZ).isoformat(),
+            }, ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button(
+                "💾 Descargar meli_tokens.json",
+                data=buf,
+                file_name="meli_tokens.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
         # --- Prueba rápida de etiqueta (SIEMPRE visible) ---
         st.markdown("---")
@@ -693,7 +695,6 @@ if access_token_val or refresh_token_val:
         )
 
         if btn_test:
-            # Usa access_token visible si existe; si no, renueva con el refresh de Secrets
             token_para_usar = access_token_val or _meli_get_access_token()
             if not token_para_usar:
                 st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
@@ -714,10 +715,6 @@ if access_token_val or refresh_token_val:
                         )
                     else:
                         st.error("No se pudo descargar la etiqueta.")
-
-
-
-
     # === ML OAuth Panel END ===
 
     colf1, colf2, colf4 = st.columns([2,1,1])
@@ -726,11 +723,10 @@ if access_token_val or refresh_token_val:
     with colf2:
         page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
     with colf4:
-        # Punto 1: Botón "Nuevo registro" restaurado
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
-    # Paginación simple
+    # Paginación
     colp1, colp2, colp3 = st.columns([1,1,6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
@@ -742,7 +738,7 @@ if access_token_val or refresh_token_val:
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
-    # Punto 7: Filtro "Solo sin guía"
+    # Filtro "Solo sin guía"
     solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
@@ -753,7 +749,7 @@ if access_token_val or refresh_token_val:
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
         df_all = df_all.copy()
 
-        # Punto 6: Columna EDITAR con ButtonColumn (sin checkbox)
+        # Columna EDITAR
         df_all["Editar"] = False
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
         if has_button_col:
@@ -761,7 +757,6 @@ if access_token_val or refresh_token_val:
                 "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
             }
         else:
-            # Fallback si la versión no soporta ButtonColumn
             column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Editar fila", default=False)}
 
         ordered_cols = ["Editar"] + show_cols
@@ -771,11 +766,11 @@ if access_token_val or refresh_token_val:
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            disabled=show_cols,   # no permitir edición inline; usar modal
+            disabled=show_cols,
             column_config=column_config
         )
 
-        # Detectar fila solicitada para editar
+        # Detectar fila a editar
         try:
             if "Editar" in edited_df.columns:
                 clicked = edited_df.index[edited_df["Editar"] == True].tolist()
