@@ -1,7 +1,8 @@
 # streamlit_app.py
 # -------------------------------------------------------------
-# Escáner Bodega  — mantiene tu app original y agrega pestaña:
-# PRUEBAS (impresión de etiqueta + conexión OAuth forzada)
+# Escáner Bodega — App original + pestaña PRUEBAS (OAuth/labels)
+# Fix: nunca usar secrets para refrescar; solo el refresh_token
+# de sesión obtenido vía OAuth. Botón de reconexión a PRUEBAS.
 # -------------------------------------------------------------
 
 import io
@@ -16,7 +17,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==============================
-# ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
+# ✅ CONFIGURACIÓN GENERAL
 # ==============================
 
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
@@ -42,15 +43,15 @@ def _get_public_or_signed_url(path: str) -> str | None:
     except Exception:
         return None
 
-def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
+def upload_pdf_to_storage(asignacion: str, file_like) -> str | None:
     """Sube/reemplaza PDF como etiquetas/<asignacion>.pdf y retorna su URL pública."""
-    if not asignacion or uploaded_file is None:
+    if not asignacion or file_like is None:
         return None
     key_path = f"{asignacion}.pdf"
-    file_bytes = uploaded_file.read()
     try:
+        data = file_like.read() if hasattr(file_like, "read") else file_like
         supabase.storage.from_(STORAGE_BUCKET).upload(
-            key_path, file_bytes, {"upsert": "true"}
+            key_path, data, {"upsert": "true"}
         )
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
@@ -84,7 +85,7 @@ def url_disponible(url: str) -> bool:
         return False
 
 # ==============================
-# ✅ DB HELPERS (NO MODIFICAR)
+# ✅ DB HELPERS
 # ==============================
 
 def lookup_by_guia(guia: str):
@@ -124,7 +125,6 @@ def insert_no_coincidente(guia: str):
     ).execute()
 
 def get_logs(page: str):
-    """Devuelve últimos 60 días según sección (ingresar / imprimir)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
     field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
     res = (
@@ -137,7 +137,7 @@ def get_logs(page: str):
     return res.data or []
 
 # ==============================
-# ✅ ESCANEO (NO AUTO-ABRIR PDF)
+# ✅ ESCANEO
 # ==============================
 
 def process_scan(guia: str):
@@ -147,27 +147,23 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
         return
 
-    # MODO INGRESAR
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente.")
         return
 
-    # MODO IMPRIMIR (sin auto-abrir PDF)
     if st.session_state.page == "imprimir":
         update_impresion(guia)
-
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
-        # Botón de descarga confiable
         if archivo_public and url_disponible(archivo_public):
             try:
                 pdf_bytes = requests.get(archivo_public, timeout=10).content
                 if pdf_bytes[:4] == b"%PDF":
                     st.success(f"🖨️ Etiqueta {asignacion} lista.")
                     st.download_button(
-                        label=f"📄 Descargar nuevamente {asignacion}.pdf",
+                        f"📄 Descargar nuevamente {asignacion}.pdf",
                         data=pdf_bytes,
                         file_name=f"{asignacion}.pdf",
                         mime="application/pdf",
@@ -180,7 +176,6 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
 
-        # Log persistente de impresión (inserción aparte)
         try:
             now = datetime.now(TZ).isoformat()
             supabase.table(TABLE_NAME).insert(
@@ -272,16 +267,14 @@ def render_log_with_download_buttons(rows: list, page: str):
     if not rows:
         st.info("No hay registros aún.")
         return
-    # Encabezado
-    if page == "imprimir":
-        cols = ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
-    else:
-        cols = ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
+    cols = (
+        ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
+        if page == "imprimir"
+        else ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
+    )
     hc = st.columns([2, 2, 2, 2, 1])
     for i, h in enumerate(cols):
         hc[i].markdown(f"**{h}**")
-
-    # Filas
     for r in rows:
         asign = r.get("asignacion", "")
         guia = r.get("guia", "")
@@ -293,7 +286,6 @@ def render_log_with_download_buttons(rows: list, page: str):
         c[1].write(guia or "-")
         c[2].write((str(fecha)[:19]) if fecha else "-")
         c[3].write(estado or "-")
-
         if url and url_disponible(url):
             try:
                 pdf_bytes = requests.get(url, timeout=8).content
@@ -326,7 +318,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
     render_log_with_download_buttons(rows, st.session_state.page)
 
 # ==============================
-# CRUD — PÁGINA DATOS  (SE MANTIENE)
+# CRUD — PÁGINA DATOS (igual que antes)
 # ==============================
 
 ALL_COLUMNS = [
@@ -553,7 +545,7 @@ if st.session_state.page == "datos":
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
-    colp1, colp2, colp3 = st.columns([1, 1, 6])
+    colp1, colp2, _ = st.columns([1, 1, 6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
             st.session_state.datos_offset -= page_size
@@ -600,7 +592,6 @@ if st.session_state.page == "datos":
             column_config=column_config,
         )
 
-        # Detectar fila para editar
         try:
             if "Editar" in edited_df.columns:
                 clicked = edited_df.index[edited_df["Editar"] == True].tolist()
@@ -615,26 +606,17 @@ if st.session_state.page == "datos":
     render_modal_if_needed()
 
 # ============================================================
-# 🔧 PRUEBAS — Conexión Mercado Libre + impresión de etiqueta
+# 🔧 PRUEBAS — OAuth + impresión etiqueta
 # ============================================================
 
-# --- Config / tokens en memoria
 if "meli" not in st.session_state:
-    st.session_state.meli = {
-        "access_token": "",
-        "refresh_token": "",
-        "expires_at": 0,  # epoch seconds
-    }
+    st.session_state.meli = {"access_token": "", "refresh_token": "", "expires_at": 0}
 
 def _cfg(key: str, default: str = "") -> str:
-    # Preferir session_state local si lo hubiera; si no, secrets
     return (st.session_state.get(key) or st.secrets.get(key) or default)
 
-# Endpoints MELI
 MELI_AUTH_BASE = "https://auth.mercadolibre.cl/authorization"
 MELI_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
-
-# Redirects
 REDIRECT_PRUEBAS = "https://escaner-bodega.streamlit.app/?page=pruebas"
 
 def _now_epoch() -> int:
@@ -643,21 +625,14 @@ def _now_epoch() -> int:
 def _token_seconds_left() -> int:
     return max(0, st.session_state.meli.get("expires_at", 0) - _now_epoch())
 
-def meli_request(
-    method: str,
-    url: str,
-    *,
-    params: dict | None = None,
-    json: dict | None = None,
-    x_format_new: bool = False,
-) -> requests.Response:
+def meli_request(method: str, url: str, *, params=None, json=None, x_format_new=False):
     token = st.session_state.meli.get("access_token") or ""
     headers = {"Authorization": f"Bearer {token}"}
     if x_format_new:
         headers["x-format-new"] = "true"
     return requests.request(method, url, params=params, json=json, headers=headers, timeout=20)
 
-def exchange_code_for_token(code: str, redirect_uri: str) -> dict | None:
+def exchange_code_for_token(code: str, redirect_uri: str) -> bool:
     payload = {
         "grant_type": "authorization_code",
         "client_id": _cfg("MELI_CLIENT_ID"),
@@ -672,17 +647,18 @@ def exchange_code_for_token(code: str, redirect_uri: str) -> dict | None:
             st.session_state.meli["access_token"] = data.get("access_token", "")
             st.session_state.meli["refresh_token"] = data.get("refresh_token", "")
             st.session_state.meli["expires_at"] = _now_epoch() + int(data.get("expires_in", 0))
-            return data
-        else:
-            st.error(f"Intercambio de code->token falló: {r.status_code} {r.text}")
+            st.success("Conectado con Mercado Libre. Tokens guardados en sesión.")
+            return True
+        st.error(f"Intercambio code->token falló: {r.status_code} {r.text}")
     except Exception as e:
         st.error(f"Error de red en token: {e}")
-    return None
+    return False
 
 def refresh_access_token() -> bool:
-    refresh_token = st.session_state.meli.get("refresh_token") or _cfg("MELI_REFRESH_TOKEN")
+    # 👉 NUNCA usar secrets aquí. Solo el refresh_token VIGENTE de sesión.
+    refresh_token = st.session_state.meli.get("refresh_token")
     if not refresh_token:
-        st.warning("No hay refresh token.")
+        st.warning("No hay refresh token en la sesión. Conecta de nuevo.")
         return False
     payload = {
         "grant_type": "refresh_token",
@@ -695,35 +671,30 @@ def refresh_access_token() -> bool:
         if r.status_code == 200:
             data = r.json()
             st.session_state.meli["access_token"] = data.get("access_token", "")
+            # MELI rota el refresh_token: GUARDAR el nuevo
             st.session_state.meli["refresh_token"] = data.get("refresh_token", refresh_token)
             st.session_state.meli["expires_at"] = _now_epoch() + int(data.get("expires_in", 0))
             return True
-        else:
-            st.error(f"Refresh falló: {r.status_code} {r.text}")
+        st.error(f"Refresh falló: {r.status_code} {r.text}")
     except Exception as e:
         st.error(f"Error de red en refresh: {e}")
     return False
 
-def derive_shipment_id(order_id: str | None, pack_id: str | None) -> tuple[str | None, str]:
-    """Intenta derivar shipment_id desde order_id o pack_id. Retorna (shipment_id, fuente)."""
+def derive_shipment_id(order_id: str | None, pack_id: str | None):
     if order_id:
         r = meli_request("GET", f"https://api.mercadolibre.com/orders/{order_id}")
         if r.status_code == 200:
-            js = r.json()
-            sid = (js.get("shipping") or {}).get("id")
+            sid = (r.json().get("shipping") or {}).get("id")
             if sid:
                 return str(sid), "orders"
         return None, f"GET /orders/{order_id} -> {r.status_code}: {r.text}"
-
     if pack_id:
         r = meli_request("GET", f"https://api.mercadolibre.com/packs/{pack_id}")
         if r.status_code == 200:
-            js = r.json()
-            sid = (js.get("shipment") or {}).get("id")
+            sid = (r.json().get("shipment") or {}).get("id")
             if sid:
                 return str(sid), "packs"
         return None, f"GET /packs/{pack_id} -> {r.status_code}: {r.text}"
-
     return None, "Sin parámetros"
 
 def get_label_pdf_bytes(shipment_id: str) -> bytes | None:
@@ -743,7 +714,7 @@ def mark_ready_to_ship(shipment_id: str) -> bool:
     st.error(f"ready_to_ship: {r.status_code} {r.text}")
     return False
 
-# --- Intercambio automático si venimos con ?code=... a PRUEBAS
+# Intercambio automático si regresamos con ?code=... a PRUEBAS
 if st.session_state.page == "pruebas":
     try:
         qp = st.query_params
@@ -751,10 +722,9 @@ if st.session_state.page == "pruebas":
         qp = st.experimental_get_query_params()
     code = (qp.get("code") or [None])[0]
     if code:
-        exchange_code_for_token(code, REDIRECT_PRUEBAS)
-        # limpiar code de la URL
-        _set_page_param("pruebas")
-        st.rerun()
+        if exchange_code_for_token(code, REDIRECT_PRUEBAS):
+            _set_page_param("pruebas")
+            st.rerun()
 
 if st.session_state.page == "pruebas":
     st.subheader("Prueba de impresión de etiqueta (no toca la base)")
@@ -769,57 +739,52 @@ if st.session_state.page == "pruebas":
     )
     subir_storage = st.checkbox("Subir a Storage (reemplaza si existe)")
 
-    colbtn1, colbtn2, colbtn3 = st.columns([1, 2, 1])
+    colbtn1, colbtn2 = st.columns([1, 2])
     probar = colbtn1.button("🔍 Probar")
     mark_rts = colbtn2.button("📌 Marcar 'Ya tengo el producto' (ready_to_ship)")
 
     st.markdown("---")
 
-    # --- Panel de credenciales locales (opcional)
+    # Panel de credenciales locales
     with st.expander("🔐 Cargar/gestionar credenciales locales (opcional)", expanded=False):
-        colA, colB = st.columns([2, 1])
-        with colA:
-            local_app_id = st.text_input("App ID", value=_cfg("MELI_CLIENT_ID"))
-            local_client_secret = st.text_input(
-                "Client Secret", value=_cfg("MELI_CLIENT_SECRET"), type="password"
-            )
-            local_access_token = st.text_input(
-                "Access token", value=st.session_state.meli.get("access_token", ""), type="password"
-            )
-            local_refresh_token = st.text_input(
-                "Refresh token",
-                value=st.session_state.meli.get("refresh_token", _cfg("MELI_REFRESH_TOKEN")),
-                type="password",
-            )
-            local_redirect = st.text_input(
-                "Redirect URI (opcional)", value=_cfg("MELI_REDIRECT_URI", REDIRECT_PRUEBAS)
-            )
-            local_expires = st.number_input(
-                "Expires in (segundos)", value=int(_token_seconds_left() or 10800), step=60
-            )
-        with colB:
-            if st.button("💾 Guardar credenciales locales", use_container_width=True):
-                st.session_state["MELI_CLIENT_ID"] = local_app_id
-                st.session_state["MELI_CLIENT_SECRET"] = local_client_secret
-                st.session_state["MELI_REDIRECT_URI"] = local_redirect
-                st.session_state.meli["access_token"] = local_access_token
-                st.session_state.meli["refresh_token"] = local_refresh_token
-                st.session_state.meli["expires_at"] = _now_epoch() + int(local_expires)
-                st.success("Credenciales locales guardadas.")
-            if st.button("🧹 Borrar tokens locales", use_container_width=True):
-                st.session_state.meli["access_token"] = ""
-                st.session_state.meli["refresh_token"] = ""
-                st.session_state.meli["expires_at"] = 0
-                st.success("Tokens locales borrados.")
-            if st.button("🔄 Refrescar access token", use_container_width=True):
-                if refresh_access_token():
-                    st.success("Access token refrescado.")
-                else:
-                    st.error("No se pudo refrescar el token.")
+        # Prefill tokens SIEMPRE desde sesión (no desde secrets)
+        local_app_id = st.text_input("App ID", value=_cfg("MELI_CLIENT_ID"))
+        local_client_secret = st.text_input(
+            "Client Secret", value=_cfg("MELI_CLIENT_SECRET"), type="password"
+        )
+        local_access_token = st.text_input(
+            "Access token", value=st.session_state.meli.get("access_token", ""), type="password"
+        )
+        local_refresh_token = st.text_input(
+            "Refresh token", value=st.session_state.meli.get("refresh_token", ""), type="password"
+        )
+        local_redirect = st.text_input("Redirect URI (opcional)", value=REDIRECT_PRUEBAS)
+        local_expires = st.number_input(
+            "Expires in (segundos)", value=int(_token_seconds_left() or 10800), step=60
+        )
+
+        colB1, colB2, colB3 = st.columns([1, 1, 1])
+        if colB1.button("💾 Guardar credenciales locales", use_container_width=True):
+            st.session_state["MELI_CLIENT_ID"] = local_app_id
+            st.session_state["MELI_CLIENT_SECRET"] = local_client_secret
+            st.session_state["MELI_REDIRECT_URI"] = local_redirect
+            st.session_state.meli["access_token"] = local_access_token
+            st.session_state.meli["refresh_token"] = local_refresh_token
+            st.session_state.meli["expires_at"] = _now_epoch() + int(local_expires)
+            st.success("Credenciales locales guardadas.")
+        if colB2.button("🧹 Borrar tokens locales", use_container_width=True):
+            st.session_state.meli["access_token"] = ""
+            st.session_state.meli["refresh_token"] = ""
+            st.session_state.meli["expires_at"] = 0
+            st.success("Tokens locales borrados.")
+        if colB3.button("🔄 Refrescar access token", use_container_width=True):
+            if refresh_access_token():
+                st.success("Access token refrescado.")
+            else:
+                st.error("No se pudo refrescar el token. Conecta de nuevo.")
 
         st.caption(f"Access token expira en ~{_token_seconds_left()} segundos.")
 
-        # --- Botón extra: Conectar / Reconectar (forzado a PRUEBAS)
         force_auth_url = (
             f"{MELI_AUTH_BASE}?response_type=code"
             f"&client_id={_cfg('MELI_CLIENT_ID')}"
@@ -838,7 +803,6 @@ if st.session_state.page == "pruebas":
                 unsafe_allow_html=True,
             )
 
-    # --- Acciones
     def _need_token() -> bool:
         if not st.session_state.meli.get("access_token"):
             st.error("No hay ACCESS_TOKEN. Conecta o refresca el token en el panel de arriba.")
@@ -848,16 +812,12 @@ if st.session_state.page == "pruebas":
     if probar:
         if _need_token():
             st.stop()
-
         sid = shipment_id_input.strip()
-        source_msg = ""
         if not sid:
-            sid, source_msg = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
+            sid, msg = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
             if not sid:
-                st.error(source_msg or "No fue posible derivar shipment_id.")
+                st.error(msg or "No fue posible derivar shipment_id.")
                 st.stop()
-
-        # Descargar etiqueta
         pdf_bytes = get_label_pdf_bytes(sid)
         if pdf_bytes and pdf_bytes[:4] == b"%PDF":
             st.success(f"Etiqueta OK — shipment_id={sid}")
@@ -868,8 +828,6 @@ if st.session_state.page == "pruebas":
                 mime="application/pdf",
                 use_container_width=True,
             )
-
-            # Subir a Storage si corresponde
             if subir_storage and asignacion_input.strip():
                 url_pdf = upload_pdf_to_storage(asignacion_input.strip(), io.BytesIO(pdf_bytes))
                 if url_pdf:
@@ -882,7 +840,7 @@ if st.session_state.page == "pruebas":
             st.stop()
         sid = shipment_id_input.strip()
         if not sid:
-            sid, _msg = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
+            sid, _ = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
         if not sid:
             st.error("Debes indicar shipment_id o derivarlo por order_id/pack_id.")
         else:
