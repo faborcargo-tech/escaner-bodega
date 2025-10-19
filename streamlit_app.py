@@ -557,7 +557,8 @@ if st.session_state.page == "datos":
     st.markdown("### Base de datos")
 
     # 🔐 Conectar Mercado Libre (OAuth) – asistente en la nube
-with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=False):
+st.session_state.setdefault("meli_open", True)  # que quede abierto mientras conectas
+with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_state["meli_open"]):
     st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; al final descarga un JSON con los tokens.")
 
     # Credenciales desde secrets (editable por si quieres probar con otra app)
@@ -592,13 +593,16 @@ if "meli_oauth_state" not in st.session_state:
 
 
     # Link de autorización
-    if client_id and redirect_uri:
-        auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
+   if client_id and redirect_uri:
+    auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
 
-        if hasattr(st, "link_button"):
-            st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
-        else:
-            st.markdown(f"[➡️ Autorizar en Mercado Libre]({auth_url})")
+    st.session_state["meli_open"] = True        # ← AQUÍ (antes del botón/enlace)
+
+    if hasattr(st, "link_button"):
+        st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
+    else:
+        st.markdown(f"[➡️ Autorizar en Mercado Libre]({auth_url})")
+
 
     st.divider()
 
@@ -617,15 +621,18 @@ if "meli_oauth_state" not in st.session_state:
     state_in = colD.text_input("State recibido", value=_state)
 
     # Intercambio code -> tokens
-    if st.button("🔄 Obtener tokens", use_container_width=True, disabled=not (client_id and client_secret and redirect_uri and code_in)):
-        if state_in and state_in != st.session_state.meli_oauth_state:
-            st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
-        else:
-            tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
-            if tokens:
-                st.session_state.meli_tokens = tokens
-                st.success("✅ Tokens obtenidos.")
-                st.json(tokens)
+    if st.button("🔄 Obtener tokens", use_container_width=True,
+             disabled=not (client_id and client_secret and redirect_uri and code_in)):
+    st.session_state["meli_open"] = True  # mantener abierto
+    if state_in and state_in != st.session_state.meli_oauth_state:
+        st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
+    else:
+        tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
+        if tokens:
+            st.session_state.meli_tokens = tokens
+            st.success("✅ Tokens obtenidos.")
+            st.json(tokens)  # ← AQUI: verás refresh_token en la respuesta
+
 
     # Mostrar/descargar tokens y prueba rápida de etiqueta
     tokens = st.session_state.get("meli_tokens")
