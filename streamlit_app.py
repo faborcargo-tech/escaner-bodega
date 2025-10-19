@@ -8,7 +8,7 @@ import time
 
 # --- MERCADO LIBRE: helpers mínimos para OAuth + etiqueta ---
 from typing import Optional
-import json, base64, secrets as pysecrets
+import json, secrets as pysecrets
 
 MELI_API_BASE = "https://api.mercadolibre.com"
 
@@ -80,7 +80,6 @@ def _meli_download_label_pdf(shipment_id: str, access_token: str) -> Optional[by
         pass
     return None
 
-
 # ====== AUTO-REFRESH ACCESS TOKEN (usa secrets) ======
 MELI_CLIENT_ID = (st.secrets.get("MELI_CLIENT_ID") or "").strip()
 MELI_CLIENT_SECRET = (st.secrets.get("MELI_CLIENT_SECRET") or "").strip()
@@ -144,12 +143,8 @@ def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
             pass
     return None
 
-
-
 # ==============================
 # ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
-# - Centraliza URL/KEY de Supabase y parámetros base.
-# - Evita errores de inicialización y mantiene timezone consistente.
 # ==============================
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
@@ -161,11 +156,8 @@ TABLE_NAME = "paquetes_mercadoenvios_chile"
 STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
-
 # ==============================
 # ✅ BLOQUE ESTABLE — STORAGE (NO MODIFICAR)
-# - Sube/reemplaza PDFs con upsert.
-# - Fuerza MIME application/pdf para evitar que el navegador muestre "código".
 # ==============================
 def _get_public_or_signed_url(path: str) -> str | None:
     try:
@@ -175,7 +167,6 @@ def _get_public_or_signed_url(path: str) -> str | None:
         return url
     except Exception:
         return None
-
 
 def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
     """Sube/reemplaza PDF como etiquetas/<asignacion>.pdf y retorna su URL pública."""
@@ -202,7 +193,6 @@ def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
 
     return _get_public_or_signed_url(key_path)
 
-
 def url_disponible(url: str) -> bool:
     """HEAD 200 OK -> existe."""
     if not url:
@@ -213,16 +203,12 @@ def url_disponible(url: str) -> bool:
     except Exception:
         return False
 
-
 # ==============================
 # ✅ BLOQUE ESTABLE — DB HELPERS (NO MODIFICAR)
-# - Operaciones atómicas de lectura/actualización.
-# - Inserta NO COINCIDENTE si la guía no existe.
 # ==============================
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return res.data[0] if res.data else None
-
 
 def update_ingreso(guia: str):
     now = datetime.now(TZ)
@@ -231,14 +217,12 @@ def update_ingreso(guia: str):
         "estado_escaneo": "INGRESADO CORRECTAMENTE!"
     }).eq("guia", guia).execute()
 
-
 def update_impresion(guia: str):
     now = datetime.now(TZ)
     supabase.table(TABLE_NAME).update({
         "fecha_impresion": now.isoformat(),
         "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"
     }).eq("guia", guia).execute()
-
 
 def insert_no_coincidente(guia: str):
     now = datetime.now(TZ)
@@ -258,7 +242,6 @@ def insert_no_coincidente(guia: str):
         "titulo": ""
     }).execute()
 
-
 def get_logs(page: str):
     """Devuelve últimos 60 días de acuerdo a la sección (ingreso/impresión)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
@@ -266,12 +249,8 @@ def get_logs(page: str):
     res = supabase.table(TABLE_NAME).select("*").gte(field, cutoff).order(field, desc=True).execute()
     return res.data or []
 
-
 # ==============================
-# ✅ BLOQUE ESTABLE — ESCANEO (NO AUTO-ABRIR PDF) (NO MODIFICAR)
-# - Punto 3: elimina intento de auto-abrir PDF.
-# - Mantiene botón "Descargar nuevamente ..." que funciona perfecto.
-# - Inserta un nuevo registro de impresión (log persistente).
+# ✅ BLOQUE ESTABLE — ESCANEO (NO AUTO-ABRIR PDF)
 # ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
@@ -294,7 +273,7 @@ def process_scan(guia: str):
         archivo_public = match.get("archivo_adjunto") or ""
 
         # 1) Intentar con Mercado Libre (auto-refresh) y caer a respaldo
-        pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh en secrets; si falla, usa archivo_adjunto
+        pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh; si falla, usa archivo_adjunto
 
         if pdf_bytes and pdf_bytes[:4] == b"%PDF":
             st.success(f"🖨️ Etiqueta {asignacion} lista (prioridad Mercado Libre).")
@@ -330,12 +309,8 @@ def process_scan(guia: str):
             # RLS estricta: si falla inserción del log, no rompe el flujo.
             pass
 
-
-
 # ==============================
 # ✅ BLOQUE ESTABLE — PERSISTENCIA DE SECCIÓN (NO MODIFICAR)
-# - Punto 2: cada sección usa ?page=... en la URL.
-# - Al refrescar, NO cambia de sección.
 # ==============================
 def _get_page_param_default() -> str:
     try:
@@ -358,10 +333,8 @@ def set_page(p: str):
     st.session_state.page = p
     _set_page_param(p)
 
-
 # ==============================
 # ✅ BLOQUE ESTABLE — UI PRINCIPAL (NO MODIFICAR)
-# - Mantiene estilos por sección.
 # ==============================
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -382,12 +355,8 @@ st.header(
     else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
 )
 
-
 # ==============================
 # ✅ BLOQUE ESTABLE — LOG DE ESCANEOS (NO MODIFICAR)
-# - Punto 5: el “botón” dentro de la columna ARCHIVO_ADJUNTO descarga igual que el botón principal.
-# - Para lograrlo sin corromper PDFs, renderizamos cada fila con botón Streamlit.
-# - Se mantiene una fila “tipo tabla” con columnas clave.
 # ==============================
 def render_log_with_download_buttons(rows: list, page: str):
     if not rows:
@@ -429,7 +398,6 @@ def render_log_with_download_buttons(rows: list, page: str):
         else:
             c[4].write("No disponible")
 
-
 # ==============================
 # SECCIONES INGRESAR / IMPRIMIR
 # ==============================
@@ -442,12 +410,8 @@ if st.session_state.page in ("ingresar", "imprimir"):
     rows = get_logs(st.session_state.page)
     render_log_with_download_buttons(rows, st.session_state.page)
 
-
 # ==============================
 # CRUD — PÁGINA DATOS
-# - Punto 1: vuelve el botón “➕ Nuevo registro”.
-# - Punto 6: columna “Editar” usa ButtonColumn (no checkbox) y abre el formulario.
-# - Punto 7: checkbox “Solo sin guía”.
 # ==============================
 ALL_COLUMNS = [
     "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
@@ -620,7 +584,7 @@ if st.session_state.page == "datos":
     st.session_state.setdefault("meli_open", True)
 
     with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_state["meli_open"]):
-        st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; descarga un JSON con los tokens.")
+        st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; puedes descargar un JSON con los tokens.")
 
         # --- Credenciales (desde secrets, editables) ---
         colA, colB = st.columns(2)
@@ -639,7 +603,6 @@ if st.session_state.page == "datos":
             if _state_qp:
                 st.session_state.meli_oauth_state = _state_qp
             else:
-                import secrets as pysecrets
                 st.session_state.meli_oauth_state = pysecrets.token_urlsafe(16)
                 try:
                     st.query_params["meli_state"] = st.session_state.meli_oauth_state
@@ -669,7 +632,7 @@ if st.session_state.page == "datos":
         code_in = colC.text_input("Code (si no volvió automático, pégalo aquí)", value=_code)
         state_in = colD.text_input("State recibido", value=_state)
 
-        # --- Forzar state si acabo de autorizar (bypass seguro para uso interno) ---
+        # --- Forzar state si acabo de autorizar (bypass seguro) ---
         forzar_state = st.checkbox("Confirmo que acabo de autorizar y quiero forzar el state")
 
         # --- Obtener tokens (code -> access/refresh) ---
@@ -689,7 +652,7 @@ if st.session_state.page == "datos":
                     st.success("✅ Tokens obtenidos.")
                     st.json(tokens)  # verás refresh_token en la respuesta
 
-                # --- Mostrar tokens y prueba de etiqueta ---
+        # --- Mostrar tokens y prueba de etiqueta ---
         tokens = st.session_state.get("meli_tokens") or {}
         access_token_val = tokens.get("access_token", "")
         refresh_token_val = tokens.get("refresh_token", "")
@@ -704,35 +667,31 @@ if st.session_state.page == "datos":
             st.write("### Prueba rápida de etiqueta")
             order_id_test = st.text_input("order_id para probar", value="")
 
-# Botón habilitado solo por tener order_id
-btn_test = st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip()))
-if btn_test:
-    # Usa el token visible o renueva automáticamente con el refresh de st.secrets
-    token_para_usar = access_token_val or _meli_get_access_token()
-    if not token_para_usar:
-        st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
-    else:
-        sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
-        if not sid:
-            st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
-        else:
-            pdf = _meli_download_label_pdf(sid, token_para_usar)
-            if pdf and pdf[:4] == b"%PDF":
-                st.success(f"PDF OK (shipment_id={sid})")
-                st.download_button(
-                    "📄 Descargar etiqueta.pdf",
-                    data=pdf,
-                    file_name="etiqueta.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-            else:
-                st.error("No se pudo descargar la etiqueta.")
-
-
+            # Botón habilitado solo por tener order_id; token se obtiene automáticamente si hace falta
+            btn_test = st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip()))
+            if btn_test:
+                token_para_usar = access_token_val or _meli_get_access_token()
+                if not token_para_usar:
+                    st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
+                else:
+                    sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
+                    if not sid:
+                        st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
+                    else:
+                        pdf = _meli_download_label_pdf(sid, token_para_usar)
+                        if pdf and pdf[:4] == b"%PDF":
+                            st.success(f"PDF OK (shipment_id={sid})")
+                            st.download_button(
+                                "📄 Descargar etiqueta.pdf",
+                                data=pdf,
+                                file_name="etiqueta.pdf",
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+                        else:
+                            st.error("No se pudo descargar la etiqueta.")
 
             # (Opcional) Descargar tokens como JSON
-            import json
             buf = json.dumps({
                 "client_id": client_id,
                 "client_secret": client_secret,
@@ -751,38 +710,7 @@ if btn_test:
             )
         else:
             st.info("Primero obtén los tokens con el botón **Obtener tokens**.")
-
-        
     # === ML OAuth Panel END ===
-
-
-
-        st.markdown("---")
-        st.write("### Prueba rápida de etiqueta")
-        order_id_test = st.text_input("order_id para probar", value="")
-        if st.button("🔎 Probar descarga PDF", disabled=not (order_id_test and access_token)):
-            sid = _meli_get_shipment_id_from_order(order_id_test.strip(), access_token)
-            if not sid:
-                st.error("No se encontró shipment_id (¿es Mercado Envíos / lista para imprimir?).")
-            else:
-                pdf = _meli_download_label_pdf(sid, access_token)
-                if pdf and pdf[:4] == b"%PDF":
-                    st.success(f"PDF OK (shipment_id={sid})")
-                    st.download_button("📄 Descargar etiqueta.pdf", data=pdf, file_name="etiqueta.pdf", mime="application/pdf", use_container_width=True)
-                else:
-                    st.error("No se pudo descargar la etiqueta.")
-
-        buf = json.dumps({
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "access_token": access_token_val,
-            "refresh_token": refresh_token_val,
-            "obtained_at": datetime.now(TZ).isoformat(),
-        }, ensure_ascii=False, indent=2).encode("utf-8")
-
-        st.download_button("💾 Descargar meli_tokens.json", data=buf, file_name="meli_tokens.json", mime="application/json", use_container_width=True)
-
 
     colf1, colf2, colf4 = st.columns([2,1,1])
     with colf1:
@@ -842,8 +770,6 @@ if btn_test:
         # Detectar fila solicitada para editar
         try:
             if "Editar" in edited_df.columns:
-                # tanto para ButtonColumn (True en la fila clickeada)
-                # como para Checkbox fallback
                 clicked = edited_df.index[edited_df["Editar"] == True].tolist()
                 if clicked:
                     idx = clicked[0]
