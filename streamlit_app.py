@@ -1,15 +1,24 @@
-import streamlit as st
+# streamlit_app.py
+# -------------------------------------------------------------
+# Escáner Bodega  — mantiene tu app original y agrega pestaña:
+# PRUEBAS (impresión de etiqueta + conexión OAuth forzada)
+# -------------------------------------------------------------
+
+import io
+import time
+from datetime import datetime, timedelta
+from urllib.parse import quote_plus
+
 import pandas as pd
-from supabase import create_client, Client
-from datetime import datetime, timedelta, timezone
 import pytz
 import requests
-import time
-from typing import Optional, Dict, Any
+import streamlit as st
+from supabase import Client, create_client
 
 # ==============================
-# CONFIGURACIÓN GENERAL
+# ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
 # ==============================
+
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -21,9 +30,10 @@ STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# STORAGE HELPERS
+# ✅ STORAGE HELPERS
 # ==============================
-def _get_public_or_signed_url(path: str) -> Optional[str]:
+
+def _get_public_or_signed_url(path: str) -> str | None:
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
         if isinstance(url, dict):
@@ -32,8 +42,8 @@ def _get_public_or_signed_url(path: str) -> Optional[str]:
     except Exception:
         return None
 
-def upload_pdf_to_storage(asignacion: str, uploaded_file) -> Optional[str]:
-    """Sube/reemplaza PDF como <asignacion>.pdf y retorna URL pública."""
+def upload_pdf_to_storage(asignacion: str, uploaded_file) -> str | None:
+    """Sube/reemplaza PDF como etiquetas/<asignacion>.pdf y retorna su URL pública."""
     if not asignacion or uploaded_file is None:
         return None
     key_path = f"{asignacion}.pdf"
@@ -68,226 +78,68 @@ def url_disponible(url: str) -> bool:
     if not url:
         return False
     try:
-        r = requests.head(url, timeout=6)
+        r = requests.head(url, timeout=5)
         return r.status_code == 200
     except Exception:
         return False
 
 # ==============================
-# DB HELPERS
+# ✅ DB HELPERS (NO MODIFICAR)
 # ==============================
+
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
     return res.data[0] if res.data else None
 
 def update_ingreso(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).update({
-        "fecha_ingreso": now.isoformat(),
-        "estado_escaneo": "INGRESADO CORRECTAMENTE!"
-    }).eq("guia", guia).execute()
+    supabase.table(TABLE_NAME).update(
+        {"fecha_ingreso": now.isoformat(), "estado_escaneo": "INGRESADO CORRECTAMENTE!"}
+    ).eq("guia", guia).execute()
 
 def update_impresion(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).update({
-        "fecha_impresion": now.isoformat(),
-        "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"
-    }).eq("guia", guia).execute()
+    supabase.table(TABLE_NAME).update(
+        {"fecha_impresion": now.isoformat(), "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!"}
+    ).eq("guia", guia).execute()
 
 def insert_no_coincidente(guia: str):
     now = datetime.now(TZ)
-    supabase.table(TABLE_NAME).insert({
-        "asignacion": "",
-        "guia": guia,
-        "fecha_ingreso": now.isoformat(),
-        "estado_escaneo": "NO COINCIDENTE!",
-        "asin": "",
-        "cantidad": 0,
-        "estado_orden": "",
-        "estado_envio": "",
-        "archivo_adjunto": "",
-        "url_imagen": "",
-        "comentario": "",
-        "descripcion": "",
-        "titulo": ""
-    }).execute()
+    supabase.table(TABLE_NAME).insert(
+        {
+            "asignacion": "",
+            "guia": guia,
+            "fecha_ingreso": now.isoformat(),
+            "estado_escaneo": "NO COINCIDENTE!",
+            "asin": "",
+            "cantidad": 0,
+            "estado_orden": "",
+            "estado_envio": "",
+            "archivo_adjunto": "",
+            "url_imagen": "",
+            "comentario": "",
+            "descripcion": "",
+            "titulo": "",
+        }
+    ).execute()
 
 def get_logs(page: str):
+    """Devuelve últimos 60 días según sección (ingresar / imprimir)."""
     cutoff = (datetime.now(TZ) - timedelta(days=60)).isoformat()
     field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
-    res = supabase.table(TABLE_NAME).select("*").gte(field, cutoff).order(field, desc=True).execute()
+    res = (
+        supabase.table(TABLE_NAME)
+        .select("*")
+        .gte(field, cutoff)
+        .order(field, desc=True)
+        .execute()
+    )
     return res.data or []
 
 # ==============================
-# MERCADO LIBRE - AUTH + API
+# ✅ ESCANEO (NO AUTO-ABRIR PDF)
 # ==============================
-ML_AUTH_HOST = "https://auth.mercadolibre.cl"
-ML_API = "https://api.mercadolibre.com"
 
-def _ss_init():
-    ss = st.session_state
-    ss.setdefault("page", "ingresar")
-    ss.setdefault("meli_local", {
-        "client_id": st.secrets.get("MELI_CLIENT_ID", ""),
-        "client_secret": st.secrets.get("MELI_CLIENT_SECRET", ""),
-        "redirect_uri": st.secrets.get("MELI_REDIRECT_URI", ""),
-        "access_token": "",
-        "refresh_token": st.secrets.get("MELI_REFRESH_TOKEN", ""),
-        "expires_at": 0,  # epoch seconds
-    })
-_ss_init()
-
-def _now_epoch() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
-
-def meli_oauth_url(client_id: str, redirect_uri: str, state: str = "ok") -> str:
-    return (
-        f"{ML_AUTH_HOST}/authorization"
-        f"?response_type=code&client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&state={state}"
-    )
-
-def meli_exchange_code_for_tokens(code: str) -> Optional[Dict[str, Any]]:
-    ml = st.session_state.meli_local
-    if not (ml["client_id"] and ml["client_secret"] and ml["redirect_uri"] and code):
-        return None
-    data = {
-        "grant_type": "authorization_code",
-        "client_id": ml["client_id"],
-        "client_secret": ml["client_secret"],
-        "code": code,
-        "redirect_uri": ml["redirect_uri"],
-    }
-    try:
-        r = requests.post(f"{ML_API}/oauth/token", data=data, timeout=15)
-        if r.status_code == 200:
-            tok = r.json()
-            ml["access_token"] = tok.get("access_token", "")
-            ml["refresh_token"] = tok.get("refresh_token", "")
-            ml["expires_at"] = _now_epoch() + int(tok.get("expires_in", 10800)) - 60
-            return tok
-        else:
-            st.error(f"Token exchange error {r.status_code}: {r.text}")
-    except Exception as e:
-        st.error(f"Token exchange exception: {e}")
-    return None
-
-def meli_refresh_access_token() -> bool:
-    ml = st.session_state.meli_local
-    rt = ml.get("refresh_token") or st.secrets.get("MELI_REFRESH_TOKEN", "")
-    if not (ml["client_id"] and ml["client_secret"] and rt):
-        return False
-    data = {
-        "grant_type": "refresh_token",
-        "client_id": ml["client_id"],
-        "client_secret": ml["client_secret"],
-        "refresh_token": rt,
-    }
-    try:
-        r = requests.post(f"{ML_API}/oauth/token", data=data, timeout=15)
-        if r.status_code == 200:
-            tok = r.json()
-            ml["access_token"] = tok.get("access_token", "")
-            ml["refresh_token"] = tok.get("refresh_token", rt)
-            ml["expires_at"] = _now_epoch() + int(tok.get("expires_in", 10800)) - 60
-            return True
-        else:
-            st.error(f"Refresh error {r.status_code}: {r.text}")
-            return False
-    except Exception as e:
-        st.error(f"Refresh exception: {e}")
-        return False
-
-def meli_get_access_token() -> Optional[str]:
-    ml = st.session_state.meli_local
-    at = ml.get("access_token", "")
-    if at and _now_epoch() < int(ml.get("expires_at", 0)):
-        return at
-    # Si no hay AT válido, intenta refrescar
-    if meli_refresh_access_token():
-        return st.session_state.meli_local.get("access_token")
-    return None
-
-def meli_get(path: str, params: Optional[dict] = None, raw: bool = False):
-    at = meli_get_access_token()
-    if not at:
-        raise RuntimeError("No hay ACCESS_TOKEN disponible. Conecta o refresca.")
-    headers = {"Authorization": f"Bearer {at}"}
-    url = f"{ML_API}{path}"
-    r = requests.get(url, headers=headers, params=params or {}, timeout=20)
-    if raw:
-        return r
-    if r.status_code >= 400:
-        raise RuntimeError(f"GET {path} -> {r.status_code}: {r.text}")
-    return r.json()
-
-def meli_post(path: str, json_body: Optional[dict] = None):
-    at = meli_get_access_token()
-    if not at:
-        raise RuntimeError("No hay ACCESS_TOKEN disponible. Conecta o refresca.")
-    headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
-    url = f"{ML_API}{path}"
-    r = requests.post(url, headers=headers, json=json_body or {}, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"POST {path} -> {r.status_code}: {r.text}")
-    return r.json() if r.text else {}
-
-def derive_shipment_id(order_id: str, pack_id: str) -> Optional[str]:
-    """Obtiene shipment_id desde order o pack."""
-    if order_id:
-        j = meli_get(f"/orders/{order_id}")
-        shipping = (j or {}).get("shipping") or {}
-        sid = shipping.get("id")
-        if sid:
-            return str(sid)
-    if pack_id:
-        j = meli_get(f"/packs/{pack_id}")
-        shp = (j or {}).get("shipment") or {}
-        sid = shp.get("id")
-        if sid:
-            return str(sid)
-    return None
-
-def download_label_pdf(shipment_id: str) -> bytes:
-    r = meli_get("/shipment_labels", params={"shipment_ids": shipment_id, "response_type": "pdf"}, raw=True)
-    if hasattr(r, "status_code") and r.status_code == 200:
-        return r.content
-    raise RuntimeError(f"Labels -> {getattr(r, 'status_code', '???')}")
-
-def mark_ready_to_ship(shipment_id: str):
-    return meli_post(f"/shipments/{shipment_id}/process/ready_to_ship", json_body={})
-
-# --- Captura global del parámetro ?code=... (funciona en cualquier página)
-def _capture_oauth_code_if_present():
-    try:
-        qp = st.query_params
-        code_from_url = qp.get("code", [None])[0]
-        state = qp.get("state", [None])[0]
-        current_page = qp.get("page", [st.session_state.page])[0]
-    except Exception:
-        qp = st.experimental_get_query_params()
-        code_from_url = qp.get("code", [None])[0]
-        state = qp.get("state", [None])[0]
-        current_page = qp.get("page", [st.session_state.page])[0]
-
-    if code_from_url:
-        tok = meli_exchange_code_for_tokens(code_from_url)
-        if tok:
-            st.success("¡Conexión lista! Tokens guardados.")
-        else:
-            st.error("No se pudo intercambiar el code. Reintenta reconectar.")
-        # limpiar URL y mantener la página actual
-        try:
-            st.query_params["page"] = current_page
-        except Exception:
-            st.experimental_set_query_params(page=current_page)
-
-_capture_oauth_code_if_present()
-
-# ==============================
-# SCAN FLOW (NO CAMBIAR)
-# ==============================
 def process_scan(guia: str):
     match = lookup_by_guia(guia)
     if not match:
@@ -295,16 +147,20 @@ def process_scan(guia: str):
         st.error(f"⚠️ Guía {guia} no encontrada. Se registró como NO COINCIDENTE.")
         return
 
+    # MODO INGRESAR
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         st.success(f"📦 Guía {guia} ingresada correctamente.")
         return
 
+    # MODO IMPRIMIR (sin auto-abrir PDF)
     if st.session_state.page == "imprimir":
         update_impresion(guia)
+
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
+        # Botón de descarga confiable
         if archivo_public and url_disponible(archivo_public):
             try:
                 pdf_bytes = requests.get(archivo_public, timeout=10).content
@@ -324,30 +180,33 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
 
-        # log persistente
+        # Log persistente de impresión (inserción aparte)
         try:
             now = datetime.now(TZ).isoformat()
-            supabase.table(TABLE_NAME).insert({
-                "asignacion": asignacion,
-                "guia": guia,
-                "fecha_impresion": now,
-                "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!",
-                "estado_orden": match.get("estado_orden"),
-                "estado_envio": match.get("estado_envio"),
-                "archivo_adjunto": archivo_public,
-                "comentario": match.get("comentario"),
-                "titulo": match.get("titulo"),
-                "asin": match.get("asin"),
-                "cantidad": match.get("cantidad"),
-                "orden_meli": match.get("orden_meli"),
-                "pack_id": match.get("pack_id"),
-            }).execute()
+            supabase.table(TABLE_NAME).insert(
+                {
+                    "asignacion": asignacion,
+                    "guia": guia,
+                    "fecha_impresion": now,
+                    "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!",
+                    "estado_orden": match.get("estado_orden"),
+                    "estado_envio": match.get("estado_envio"),
+                    "archivo_adjunto": archivo_public,
+                    "comentario": match.get("comentario"),
+                    "titulo": match.get("titulo"),
+                    "asin": match.get("asin"),
+                    "cantidad": match.get("cantidad"),
+                    "orden_meli": match.get("orden_meli"),
+                    "pack_id": match.get("pack_id"),
+                }
+            ).execute()
         except Exception:
             pass
 
 # ==============================
-# PAGE STATE / NAV
+# ✅ PERSISTENCIA DE SECCIÓN
 # ==============================
+
 def _get_page_param_default() -> str:
     try:
         qp = st.query_params
@@ -370,8 +229,9 @@ def set_page(p: str):
     _set_page_param(p)
 
 # ==============================
-# UI TOP NAV
+# ✅ NAV
 # ==============================
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     if st.button("INGRESAR PAQUETES"):
@@ -383,26 +243,36 @@ with col3:
     if st.button("🗃️ DATOS"):
         set_page("datos")
 with col4:
-    if st.button("🧪 PRUEBAS"):
+    if st.button("🔧 PRUEBAS"):
         set_page("pruebas")
 
-bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4", "pruebas": "#F6DD9B"}.get(st.session_state.page, "#F2F4F4")
+bg = {
+    "ingresar": "#71A9D9",
+    "imprimir": "#71D999",
+    "datos": "#F2F4F4",
+    "pruebas": "#F7E1A1",
+}.get(st.session_state.page, "#F2F4F4")
 st.markdown(f"<style>.stApp{{background-color:{bg};}}</style>", unsafe_allow_html=True)
 
 st.header(
-    "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
-    else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir"
-          else ("🗃️ DATOS" if st.session_state.page == "datos" else "🧪 PRUEBAS"))
+    "📦 INGRESAR PAQUETES"
+    if st.session_state.page == "ingresar"
+    else (
+        "🖨️ IMPRIMIR GUIAS"
+        if st.session_state.page == "imprimir"
+        else ("🗃️ DATOS" if st.session_state.page == "datos" else "🔧 PRUEBAS")
+    )
 )
 
 # ==============================
-# LOG VISUALIZATION
+# ✅ LOG DE ESCANEOS
 # ==============================
+
 def render_log_with_download_buttons(rows: list, page: str):
     if not rows:
         st.info("No hay registros aún.")
         return
-
+    # Encabezado
     if page == "imprimir":
         cols = ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
     else:
@@ -411,6 +281,7 @@ def render_log_with_download_buttons(rows: list, page: str):
     for i, h in enumerate(cols):
         hc[i].markdown(f"**{h}**")
 
+    # Filas
     for r in rows:
         asign = r.get("asignacion", "")
         guia = r.get("guia", "")
@@ -442,8 +313,9 @@ def render_log_with_download_buttons(rows: list, page: str):
             c[4].write("No disponible")
 
 # ==============================
-# PAGES: INGRESAR / IMPRIMIR
+# SECCIONES INGRESAR / IMPRIMIR
 # ==============================
+
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
@@ -454,23 +326,50 @@ if st.session_state.page in ("ingresar", "imprimir"):
     render_log_with_download_buttons(rows, st.session_state.page)
 
 # ==============================
-# PAGE: DATOS (CRUD resumido)
+# CRUD — PÁGINA DATOS  (SE MANTIENE)
 # ==============================
+
 ALL_COLUMNS = [
-    "id", "asignacion", "guia", "fecha_ingreso", "estado_escaneo",
-    "asin", "cantidad", "estado_orden", "estado_envio",
-    "archivo_adjunto", "url_imagen", "comentario", "descripcion",
-    "fecha_impresion", "titulo", "orden_meli", "pack_id"
+    "id",
+    "asignacion",
+    "guia",
+    "fecha_ingreso",
+    "estado_escaneo",
+    "asin",
+    "cantidad",
+    "estado_orden",
+    "estado_envio",
+    "archivo_adjunto",
+    "url_imagen",
+    "comentario",
+    "descripcion",
+    "fecha_impresion",
+    "titulo",
+    "orden_meli",
+    "pack_id",
 ]
 REQUIRED_FIELDS = ["asignacion", "orden_meli"]
 LOCKED_FIELDS_EDIT = ["asignacion", "orden_meli"]
 
 def datos_defaults():
     return dict(
-        id=None, asignacion="", guia="", fecha_ingreso=None, estado_escaneo="",
-        asin="", cantidad=1, estado_orden="", estado_envio="",
-        archivo_adjunto="", url_imagen="", comentario="", descripcion="",
-        fecha_impresion=None, titulo="", orden_meli="", pack_id=""
+        id=None,
+        asignacion="",
+        guia="",
+        fecha_ingreso=None,
+        estado_escaneo="",
+        asin="",
+        cantidad=1,
+        estado_orden="",
+        estado_envio="",
+        archivo_adjunto="",
+        url_imagen="",
+        comentario="",
+        descripcion="",
+        fecha_impresion=None,
+        titulo="",
+        orden_meli="",
+        pack_id="",
     )
 
 def datos_fetch(limit=200, offset=0, search: str = ""):
@@ -483,9 +382,19 @@ def datos_fetch(limit=200, offset=0, search: str = ""):
 
 def datos_find_duplicates(asignacion, orden_meli, pack_id):
     seen = {}
-    for field, value in [("asignacion", asignacion), ("orden_meli", orden_meli), ("pack_id", pack_id)]:
+    for field, value in [
+        ("asignacion", asignacion),
+        ("orden_meli", orden_meli),
+        ("pack_id", pack_id),
+    ]:
         if value:
-            res = supabase.table(TABLE_NAME).select("id,asignacion,orden_meli,pack_id,guia,titulo").eq(field, value).limit(50).execute()
+            res = (
+                supabase.table(TABLE_NAME)
+                .select("id,asignacion,orden_meli,pack_id,guia,titulo")
+                .eq(field, value)
+                .limit(50)
+                .execute()
+            )
             for r in (res.data or []):
                 seen[r["id"]] = r
     return list(seen.values())
@@ -495,7 +404,11 @@ def datos_insert(payload: dict):
     return supabase.table(TABLE_NAME).insert(clean).execute()
 
 def datos_update(id_val: int, payload: dict):
-    clean = {k: v for k, v in payload.items() if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])}
+    clean = {
+        k: v
+        for k, v in payload.items()
+        if k in ALL_COLUMNS and k not in (LOCKED_FIELDS_EDIT + ["id"])
+    }
     if not clean:
         return None
     return supabase.table(TABLE_NAME).update(clean).eq("id", id_val).execute()
@@ -533,20 +446,26 @@ def _render_form_contents():
     colA, colB, colC = st.columns(3)
 
     if mode == "edit":
-        data["asignacion"] = colA.text_input("asignacion", value=data.get("asignacion") or "", disabled=True)
-        data["orden_meli"] = colB.text_input("orden_meli", value=data.get("orden_meli") or "", disabled=True)
+        data["asignacion"] = colA.text_input(
+            "asignacion", value=data.get("asignacion") or "", disabled=True
+        )
+        data["orden_meli"] = colB.text_input(
+            "orden_meli", value=data.get("orden_meli") or "", disabled=True
+        )
     else:
         data["asignacion"] = colA.text_input("asignacion *", value=data.get("asignacion") or "")
         data["orden_meli"] = colB.text_input("orden_meli *", value=data.get("orden_meli") or "")
     data["pack_id"] = colC.text_input("pack_id (opcional)", value=(data.get("pack_id") or ""))
 
     col1, col2, col3 = st.columns(3)
-    data["guia"]   = col1.text_input("guia", value=(data.get("guia") or ""))
+    data["guia"] = col1.text_input("guia", value=(data.get("guia") or ""))
     data["titulo"] = col2.text_input("titulo", value=(data.get("titulo") or ""))
-    data["asin"]   = col3.text_input("asin", value=(data.get("asin") or ""))
+    data["asin"] = col3.text_input("asin", value=(data.get("asin") or ""))
 
     col4, col5, col6 = st.columns(3)
-    data["cantidad"]     = col4.number_input("cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1)
+    data["cantidad"] = col4.number_input(
+        "cantidad", value=int(data.get("cantidad") or 1), min_value=0, step=1
+    )
     data["estado_orden"] = col5.text_input("estado_orden", value=(data.get("estado_orden") or ""))
     data["estado_envio"] = col6.text_input("estado_envio", value=(data.get("estado_envio") or ""))
 
@@ -555,16 +474,16 @@ def _render_form_contents():
         st.markdown(f"[📥 Descargar etiqueta actual]({current_pdf})", unsafe_allow_html=True)
 
     data["archivo_adjunto"] = st.text_input("archivo_adjunto (URL)", value=current_pdf)
-    data["url_imagen"]      = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
-    data["comentario"]      = st.text_area("comentario", value=(data.get("comentario") or ""))
-    data["descripcion"]     = st.text_area("descripcion", value=(data.get("descripcion") or ""))
+    data["url_imagen"] = st.text_input("url_imagen (URL)", value=(data.get("url_imagen") or ""))
+    data["comentario"] = st.text_area("comentario", value=(data.get("comentario") or ""))
+    data["descripcion"] = st.text_area("descripcion", value=(data.get("descripcion") or ""))
 
     st.caption("Subir etiqueta PDF (reemplaza la actual si existe)")
     pdf_file = st.file_uploader("Seleccionar PDF", type=["pdf"], accept_multiple_files=False)
 
-    col_btn1, col_btn2 = st.columns([1,1])
+    col_btn1, col_btn2 = st.columns([1, 1])
     submitted = col_btn1.button("💾 Guardar", use_container_width=True, key="datos_submit_btn")
-    cancel    = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
+    cancel = col_btn2.button("✖️ Cancelar", use_container_width=True, key="datos_cancel_btn")
 
     if cancel:
         close_modal()
@@ -585,7 +504,11 @@ def _render_form_contents():
             if missing:
                 st.error(f"Faltan campos obligatorios: {', '.join(missing)}")
                 return
-            dups = datos_find_duplicates(data["asignacion"].strip(), data["orden_meli"].strip(), (data.get("pack_id") or "").strip())
+            dups = datos_find_duplicates(
+                data["asignacion"].strip(),
+                data["orden_meli"].strip(),
+                (data.get("pack_id") or "").strip(),
+            )
             if dups:
                 st.warning("⚠️ Existen registros coincidentes:")
                 st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
@@ -621,7 +544,7 @@ def render_modal_if_needed():
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
 
-    colf1, colf2, colf4 = st.columns([2,1,1])
+    colf1, colf2, colf4 = st.columns([2, 1, 1])
     with colf1:
         search = st.text_input("Buscar (asignacion / guia / orden_meli / pack_id / titulo)", "")
     with colf2:
@@ -630,7 +553,7 @@ if st.session_state.page == "datos":
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
-    colp1, colp2, colp3 = st.columns([1,1,6])
+    colp1, colp2, colp3 = st.columns([1, 1, 6])
     with colp1:
         if st.button("⟵ Anterior") and st.session_state.datos_offset >= page_size:
             st.session_state.datos_offset -= page_size
@@ -655,10 +578,16 @@ if st.session_state.page == "datos":
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
         if has_button_col:
             column_config = {
-                "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
+                "Editar": st.column_config.ButtonColumn(
+                    "Editar", help="Editar fila", icon="✏️", width="small"
+                )
             }
         else:
-            column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Editar fila", default=False)}
+            column_config = {
+                "Editar": st.column_config.CheckboxColumn(
+                    "Editar", help="Editar fila", default=False
+                )
+            }
 
         ordered_cols = ["Editar"] + show_cols
 
@@ -668,9 +597,10 @@ if st.session_state.page == "datos":
             hide_index=True,
             num_rows="fixed",
             disabled=show_cols,
-            column_config=column_config
+            column_config=column_config,
         )
 
+        # Detectar fila para editar
         try:
             if "Editar" in edited_df.columns:
                 clicked = edited_df.index[edited_df["Editar"] == True].tolist()
@@ -684,104 +614,277 @@ if st.session_state.page == "datos":
 
     render_modal_if_needed()
 
-# ==============================
-# PAGE: PRUEBAS
-# ==============================
+# ============================================================
+# 🔧 PRUEBAS — Conexión Mercado Libre + impresión de etiqueta
+# ============================================================
+
+# --- Config / tokens en memoria
+if "meli" not in st.session_state:
+    st.session_state.meli = {
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0,  # epoch seconds
+    }
+
+def _cfg(key: str, default: str = "") -> str:
+    # Preferir session_state local si lo hubiera; si no, secrets
+    return (st.session_state.get(key) or st.secrets.get(key) or default)
+
+# Endpoints MELI
+MELI_AUTH_BASE = "https://auth.mercadolibre.cl/authorization"
+MELI_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
+
+# Redirects
+REDIRECT_PRUEBAS = "https://escaner-bodega.streamlit.app/?page=pruebas"
+
+def _now_epoch() -> int:
+    return int(time.time())
+
+def _token_seconds_left() -> int:
+    return max(0, st.session_state.meli.get("expires_at", 0) - _now_epoch())
+
+def meli_request(
+    method: str,
+    url: str,
+    *,
+    params: dict | None = None,
+    json: dict | None = None,
+    x_format_new: bool = False,
+) -> requests.Response:
+    token = st.session_state.meli.get("access_token") or ""
+    headers = {"Authorization": f"Bearer {token}"}
+    if x_format_new:
+        headers["x-format-new"] = "true"
+    return requests.request(method, url, params=params, json=json, headers=headers, timeout=20)
+
+def exchange_code_for_token(code: str, redirect_uri: str) -> dict | None:
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": _cfg("MELI_CLIENT_ID"),
+        "client_secret": _cfg("MELI_CLIENT_SECRET"),
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    try:
+        r = requests.post(MELI_TOKEN_URL, data=payload, timeout=25)
+        if r.status_code == 200:
+            data = r.json()
+            st.session_state.meli["access_token"] = data.get("access_token", "")
+            st.session_state.meli["refresh_token"] = data.get("refresh_token", "")
+            st.session_state.meli["expires_at"] = _now_epoch() + int(data.get("expires_in", 0))
+            return data
+        else:
+            st.error(f"Intercambio de code->token falló: {r.status_code} {r.text}")
+    except Exception as e:
+        st.error(f"Error de red en token: {e}")
+    return None
+
+def refresh_access_token() -> bool:
+    refresh_token = st.session_state.meli.get("refresh_token") or _cfg("MELI_REFRESH_TOKEN")
+    if not refresh_token:
+        st.warning("No hay refresh token.")
+        return False
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": _cfg("MELI_CLIENT_ID"),
+        "client_secret": _cfg("MELI_CLIENT_SECRET"),
+        "refresh_token": refresh_token,
+    }
+    try:
+        r = requests.post(MELI_TOKEN_URL, data=payload, timeout=25)
+        if r.status_code == 200:
+            data = r.json()
+            st.session_state.meli["access_token"] = data.get("access_token", "")
+            st.session_state.meli["refresh_token"] = data.get("refresh_token", refresh_token)
+            st.session_state.meli["expires_at"] = _now_epoch() + int(data.get("expires_in", 0))
+            return True
+        else:
+            st.error(f"Refresh falló: {r.status_code} {r.text}")
+    except Exception as e:
+        st.error(f"Error de red en refresh: {e}")
+    return False
+
+def derive_shipment_id(order_id: str | None, pack_id: str | None) -> tuple[str | None, str]:
+    """Intenta derivar shipment_id desde order_id o pack_id. Retorna (shipment_id, fuente)."""
+    if order_id:
+        r = meli_request("GET", f"https://api.mercadolibre.com/orders/{order_id}")
+        if r.status_code == 200:
+            js = r.json()
+            sid = (js.get("shipping") or {}).get("id")
+            if sid:
+                return str(sid), "orders"
+        return None, f"GET /orders/{order_id} -> {r.status_code}: {r.text}"
+
+    if pack_id:
+        r = meli_request("GET", f"https://api.mercadolibre.com/packs/{pack_id}")
+        if r.status_code == 200:
+            js = r.json()
+            sid = (js.get("shipment") or {}).get("id")
+            if sid:
+                return str(sid), "packs"
+        return None, f"GET /packs/{pack_id} -> {r.status_code}: {r.text}"
+
+    return None, "Sin parámetros"
+
+def get_label_pdf_bytes(shipment_id: str) -> bytes | None:
+    url = "https://api.mercadolibre.com/shipment_labels"
+    params = {"shipment_ids": shipment_id, "response_type": "pdf"}
+    r = meli_request("GET", url, params=params)
+    if r.status_code == 200 and r.content:
+        return r.content
+    st.error(f"Etiqueta: {r.status_code} {r.text}")
+    return None
+
+def mark_ready_to_ship(shipment_id: str) -> bool:
+    url = f"https://api.mercadolibre.com/shipments/{shipment_id}/process/ready_to_ship"
+    r = meli_request("POST", url)
+    if r.status_code == 200:
+        return True
+    st.error(f"ready_to_ship: {r.status_code} {r.text}")
+    return False
+
+# --- Intercambio automático si venimos con ?code=... a PRUEBAS
+if st.session_state.page == "pruebas":
+    try:
+        qp = st.query_params
+    except Exception:
+        qp = st.experimental_get_query_params()
+    code = (qp.get("code") or [None])[0]
+    if code:
+        exchange_code_for_token(code, REDIRECT_PRUEBAS)
+        # limpiar code de la URL
+        _set_page_param("pruebas")
+        st.rerun()
+
 if st.session_state.page == "pruebas":
     st.subheader("Prueba de impresión de etiqueta (no toca la base)")
 
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        shipment_id = st.text_input("shipment_id (opcional)", "")
-    with c2:
-        order_id = st.text_input("order_id (opcional)", "")
-    with c3:
-        pack_id = st.text_input("pack_id (opcional)", "")
+    colI, colO, colP = st.columns([1, 2, 1])
+    shipment_id_input = colI.text_input("shipment_id (opcional)")
+    order_id_input = colO.text_input("order_id (opcional)")
+    pack_id_input = colP.text_input("pack_id (opcional)")
 
-    asignacion = st.text_input("asignación (para nombrar PDF si subes a Storage)", "")
-    subir = st.checkbox("Subir a Storage (reemplaza si existe)", value=False)
+    asignacion_input = st.text_input(
+        "asignación (para nombrar PDF si subes a Storage)", placeholder="asignacion-optional"
+    )
+    subir_storage = st.checkbox("Subir a Storage (reemplaza si existe)")
 
-    colA, colB = st.columns([1,1])
-    with colA:
-        if st.button("🔍 Probar", use_container_width=True):
-            try:
-                sid = shipment_id.strip()
-                if not sid:
-                    sid = derive_shipment_id(order_id.strip(), pack_id.strip())
-                    if not sid:
-                        st.error("No se encontró shipment_id (¿order/pack correctos y visibles con este token?).")
-                        st.stop()
-                pdf_bytes = download_label_pdf(sid)
-                if pdf_bytes[:4] != b"%PDF":
-                    st.error("La respuesta no parece un PDF válido.")
-                    st.stop()
-                st.success(f"Etiqueta lista (shipment_id={sid}).")
-                st.download_button("📄 Descargar etiqueta", data=pdf_bytes, file_name=f"{(asignacion or sid)}.pdf", mime="application/pdf", use_container_width=True)
-                if subir:
-                    if not asignacion.strip():
-                        st.warning("Para subir a Storage, completa 'asignación'.")
-                    else:
-                        class _B:
-                            def __init__(self, b): self._b=b
-                            def read(self): return self._b
-                        url_pdf = upload_pdf_to_storage(asignacion.strip(), _B(pdf_bytes))
-                        if url_pdf:
-                            st.success(f"Subido a Storage: {url_pdf}")
-                        else:
-                            st.warning("No se pudo subir a Storage.")
-            except Exception as e:
-                st.error(str(e))
+    colbtn1, colbtn2, colbtn3 = st.columns([1, 2, 1])
+    probar = colbtn1.button("🔍 Probar")
+    mark_rts = colbtn2.button("📌 Marcar 'Ya tengo el producto' (ready_to_ship)")
 
-    with colB:
-        if st.button("📌 Marcar 'Ya tengo el producto' (ready_to_ship)", use_container_width=True):
-            try:
-                sid = shipment_id.strip()
-                if not sid:
-                    sid = derive_shipment_id(order_id.strip(), pack_id.strip())
-                    if not sid:
-                        st.error("No se encontró shipment_id para marcar.")
-                        st.stop()
-                mark_ready_to_ship(sid)
-                st.success(f"OK ready_to_ship (shipment_id={sid}).")
-            except Exception as e:
-                st.error(str(e))
+    st.markdown("---")
 
-    # ----- Credenciales / Reconexión -----
+    # --- Panel de credenciales locales (opcional)
     with st.expander("🔐 Cargar/gestionar credenciales locales (opcional)", expanded=False):
-        ml = st.session_state.meli_local
-        ml["client_id"] = st.text_input("App ID", ml.get("client_id",""))
-        ml["client_secret"] = st.text_input("Client Secret", ml.get("client_secret",""), type="password")
-        ml["access_token"] = st.text_input("Access token", ml.get("access_token",""), type="password")
-        ml["refresh_token"] = st.text_input("Refresh token", ml.get("refresh_token",""), type="password")
-        default_redirect = ml.get("redirect_uri") or st.secrets.get("MELI_REDIRECT_URI", "") or "https://escaner-bodega.streamlit.app/?page=pruebas"
-        ml["redirect_uri"] = st.text_input("Redirect URI (opcional)", default_redirect)
-
-        colX, colY, colZ = st.columns([1,1,1])
-        with colX:
+        colA, colB = st.columns([2, 1])
+        with colA:
+            local_app_id = st.text_input("App ID", value=_cfg("MELI_CLIENT_ID"))
+            local_client_secret = st.text_input(
+                "Client Secret", value=_cfg("MELI_CLIENT_SECRET"), type="password"
+            )
+            local_access_token = st.text_input(
+                "Access token", value=st.session_state.meli.get("access_token", ""), type="password"
+            )
+            local_refresh_token = st.text_input(
+                "Refresh token",
+                value=st.session_state.meli.get("refresh_token", _cfg("MELI_REFRESH_TOKEN")),
+                type="password",
+            )
+            local_redirect = st.text_input(
+                "Redirect URI (opcional)", value=_cfg("MELI_REDIRECT_URI", REDIRECT_PRUEBAS)
+            )
+            local_expires = st.number_input(
+                "Expires in (segundos)", value=int(_token_seconds_left() or 10800), step=60
+            )
+        with colB:
             if st.button("💾 Guardar credenciales locales", use_container_width=True):
-                st.success("Guardado en memoria de la app.")
-        with colY:
+                st.session_state["MELI_CLIENT_ID"] = local_app_id
+                st.session_state["MELI_CLIENT_SECRET"] = local_client_secret
+                st.session_state["MELI_REDIRECT_URI"] = local_redirect
+                st.session_state.meli["access_token"] = local_access_token
+                st.session_state.meli["refresh_token"] = local_refresh_token
+                st.session_state.meli["expires_at"] = _now_epoch() + int(local_expires)
+                st.success("Credenciales locales guardadas.")
             if st.button("🧹 Borrar tokens locales", use_container_width=True):
-                ml["access_token"] = ""
-                ml["refresh_token"] = ""
-                ml["expires_at"] = 0
+                st.session_state.meli["access_token"] = ""
+                st.session_state.meli["refresh_token"] = ""
+                st.session_state.meli["expires_at"] = 0
                 st.success("Tokens locales borrados.")
-        with colZ:
             if st.button("🔄 Refrescar access token", use_container_width=True):
-                ok = meli_refresh_access_token()
-                if ok:
+                if refresh_access_token():
                     st.success("Access token refrescado.")
                 else:
                     st.error("No se pudo refrescar el token.")
 
-        st.divider()
-        st.markdown("**Conectar/Reconectar con Mercado Libre (OAuth)**")
-        if ml["client_id"] and ml["redirect_uri"]:
-            auth_url = meli_oauth_url(ml["client_id"], ml["redirect_uri"], state="stk")
-            st.link_button("🔗 Conectar/Reconectar con Mercado Libre", auth_url, use_container_width=True)
-        else:
-            st.info("Completa App ID y Redirect URI para mostrar el botón de conexión.")
+        st.caption(f"Access token expira en ~{_token_seconds_left()} segundos.")
 
-        # Mostrar expiración estimada
-        exp_in = max(0, st.session_state.meli_local.get("expires_at", 0) - _now_epoch())
-        st.caption(f"Access token expira en ~{exp_in} segundos.")
+        # --- Botón extra: Conectar / Reconectar (forzado a PRUEBAS)
+        force_auth_url = (
+            f"{MELI_AUTH_BASE}?response_type=code"
+            f"&client_id={_cfg('MELI_CLIENT_ID')}"
+            f"&redirect_uri={quote_plus(REDIRECT_PRUEBAS)}"
+            f"&state=stk"
+        )
+        try:
+            st.link_button(
+                "🔗 Conectar/Reconectar con Mercado Libre (OAuth)",
+                force_auth_url,
+                use_container_width=True,
+            )
+        except Exception:
+            st.markdown(
+                f"[🔗 Conectar/Reconectar con Mercado Libre (OAuth)]({force_auth_url})",
+                unsafe_allow_html=True,
+            )
+
+    # --- Acciones
+    def _need_token() -> bool:
+        if not st.session_state.meli.get("access_token"):
+            st.error("No hay ACCESS_TOKEN. Conecta o refresca el token en el panel de arriba.")
+            return True
+        return False
+
+    if probar:
+        if _need_token():
+            st.stop()
+
+        sid = shipment_id_input.strip()
+        source_msg = ""
+        if not sid:
+            sid, source_msg = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
+            if not sid:
+                st.error(source_msg or "No fue posible derivar shipment_id.")
+                st.stop()
+
+        # Descargar etiqueta
+        pdf_bytes = get_label_pdf_bytes(sid)
+        if pdf_bytes and pdf_bytes[:4] == b"%PDF":
+            st.success(f"Etiqueta OK — shipment_id={sid}")
+            st.download_button(
+                "📄 Descargar etiqueta (PDF)",
+                data=pdf_bytes,
+                file_name=f"{(asignacion_input or f'etiqueta_{sid}')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+            # Subir a Storage si corresponde
+            if subir_storage and asignacion_input.strip():
+                url_pdf = upload_pdf_to_storage(asignacion_input.strip(), io.BytesIO(pdf_bytes))
+                if url_pdf:
+                    st.info(f"Subido a Storage: {url_pdf}")
+        else:
+            st.error("No se pudo obtener PDF de etiqueta.")
+
+    if mark_rts:
+        if _need_token():
+            st.stop()
+        sid = shipment_id_input.strip()
+        if not sid:
+            sid, _msg = derive_shipment_id(order_id_input.strip(), pack_id_input.strip())
+        if not sid:
+            st.error("Debes indicar shipment_id o derivarlo por order_id/pack_id.")
+        else:
+            if mark_ready_to_ship(sid):
+                st.success(f"Marcado ready_to_ship OK (shipment_id={sid})")
