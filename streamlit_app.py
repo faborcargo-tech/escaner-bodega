@@ -140,16 +140,13 @@ def get_logs(page: str):
     return res.data or []
 
 # ==============================
-# 🔵 NUEVO BLOQUE — MERCADO LIBRE ME2 (SOLO UTILIZADO EN "IMPRIMIR GUIAS")
-#     - Refresh token automático (sin re-autorizar al usuario)
-#     - Lectura de orders/packs/shipments
-#     - Descarga de etiqueta PDF si está lista para imprimir
+# 🔵 NUEVO BLOQUE — MERCADO LIBRE ME2 (SOLO USADO EN "IMPRIMIR" Y "PRUEBAS")
 # ==============================
 
 TOKENS_PATH = "meli_tokens.json"
 
 def _read_secrets_block():
-    # Soporta ambos formatos de secrets.
+    # Soporta dos formatos en secrets.
     app_id = st.secrets.get("MELI_APP_ID") or st.secrets.get("meli", {}).get("app_id")
     client_secret = st.secrets.get("MELI_CLIENT_SECRET") or st.secrets.get("meli", {}).get("client_secret")
     access_token = st.secrets.get("MELI_ACCESS_TOKEN") or st.secrets.get("meli", {}).get("access_token")
@@ -182,7 +179,6 @@ def _save_tokens(tok: dict):
         pass
 
 def _refresh_access_token(tokens: dict) -> dict:
-    # Usa refresh_token para renovar access_token (sin interacción de usuario)
     url = "https://api.mercadolibre.com/oauth/token"
     payload = {
         "grant_type": "refresh_token",
@@ -195,25 +191,19 @@ def _refresh_access_token(tokens: dict) -> dict:
         raise RuntimeError(f"Refresh token falló: {r.status_code} {r.text}")
     j = r.json()
     tokens["access_token"] = j["access_token"]
-    # Si devuelven un refresh nuevo, lo guardamos (Meli entrega nuevo en cada ciclo)
     tokens["refresh_token"] = j.get("refresh_token", tokens["refresh_token"])
-    # expires_in en segundos (6 horas)
-    exp = int(j.get("expires_in", 10800))
-    tokens["expires_at"] = int(time.time()) + exp - 60
+    tokens["expires_at"] = int(time.time()) + int(j.get("expires_in", 10800)) - 60
     _save_tokens(tokens)
     return tokens
 
 def _get_access_token() -> str:
     tok = _load_tokens()
     if not tok["access_token"]:
-        # No hay token inicial
         raise RuntimeError("No hay ACCESS_TOKEN en secrets o tokens locales.")
-    # si expira, intentamos refresh (si hay refresh_token)
     if int(time.time()) >= int(tok.get("expires_at", 0)) and tok.get("refresh_token"):
         try:
             tok = _refresh_access_token(tok)
         except Exception:
-            # si falla, intentaremos on-demand ante 401 igualmente
             pass
     _save_tokens(tok)
     return tok["access_token"]
@@ -228,7 +218,6 @@ def _meli_request(method: str, url: str, headers: dict | None = None, params=Non
         h["x-format-new"] = "true"
     r = requests.request(method, url, headers=h, params=params, data=data, json=json_body, timeout=20)
     if r.status_code == 401 and retry_on_401:
-        # token expirado → refresh y reintento
         tok = _load_tokens()
         if tok.get("refresh_token"):
             _refresh_access_token(tok)
@@ -273,11 +262,9 @@ def _shipment_id_from_order(order_id: str) -> str | None:
     od = _meli_get_order(order_id)
     if not od:
         return None
-    # orders nueva estructura: shipping: {"id": ...} o puede ser null si demora en crearse
     ship = (od.get("shipping") or {}).get("id")
     if ship:
         return str(ship)
-    # también podemos inspeccionar pack_id si viene null el shipping por momento
     return None
 
 def _shipment_id_from_pack(pack_id: str) -> str | None:
@@ -290,7 +277,6 @@ def _shipment_id_from_pack(pack_id: str) -> str | None:
     return None
 
 def _explicacion_estado_label(sh: dict) -> str | None:
-    # Regla ME2/no-fullfilment y estado imprimible
     mode = (sh.get("logistic") or {}).get("mode")
     ltype = (sh.get("logistic") or {}).get("type")
     status = sh.get("status")
@@ -301,7 +287,6 @@ def _explicacion_estado_label(sh: dict) -> str | None:
     if ltype == "fulfillment":
         return "Fulfillment: solo imprime etiqueta de stock (no de envío)."
     if status != "ready_to_ship":
-        # buffering
         if sub == "buffered":
             date = (((sh.get("lead_time") or {}).get("buffering") or {}).get("date"))
             return f"Buffering: la etiqueta se habilita el {date}."
@@ -343,7 +328,7 @@ def process_scan(guia: str):
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
-        # 1) Mostrar botón de descarga confiable (si ya hay PDF en storage)
+        # 1) Mostrar botón de descarga si ya hay PDF en storage
         etiqueta_ok = False
         if archivo_public and url_disponible(archivo_public):
             try:
@@ -363,72 +348,70 @@ def process_scan(guia: str):
             except Exception:
                 st.warning("⚠️ No se pudo descargar el PDF desde Supabase.")
 
-        # 2) NUEVO: Si no hay PDF válido, intentamos ME2 con orden_meli / pack_id
+        # 2) Si no hay PDF válido, intentamos ME2 con orden_meli / pack_id
         if not etiqueta_ok:
-            orden_meli = (match.get("orden_meli") or "").strip()
-            pack_id = (match.get("pack_id") or "").strip()
+            try:
+                orden_meli = (match.get("orden_meli") or "").strip()
+                pack_id = (match.get("pack_id") or "").strip()
 
-            sid = None
-            # Primero por pack_id si existe
-            if pack_id:
-                try:
-                    sid = _shipment_id_from_pack(pack_id)
-                except Exception as e:
-                    st.info(f"ℹ️ No se pudo obtener shipment desde pack {pack_id}: {e}")
-            # Si no, por orden
-            if not sid and orden_meli:
-                try:
-                    sid = _shipment_id_from_order(orden_meli)
-                except Exception as e:
-                    st.info(f"ℹ️ No se pudo obtener shipment desde orden {orden_meli}: {e}")
+                sid = None
+                if pack_id:
+                    try:
+                        sid = _shipment_id_from_pack(pack_id)
+                    except Exception as e:
+                        st.info(f"ℹ️ No se pudo obtener shipment desde pack {pack_id}: {e}")
+                if not sid and orden_meli:
+                    try:
+                        sid = _shipment_id_from_order(orden_meli)
+                    except Exception as e:
+                        st.info(f"ℹ️ No se pudo obtener shipment desde orden {orden_meli}: {e}")
 
-            if sid:
-                st.info(f"Shipment ID detectado: {sid}")
-                sh = _meli_get_shipment(sid)
-                if not sh:
-                    st.warning("⚠️ No se pudo leer el detalle del shipment.")
-                else:
-                    cause = _explicacion_estado_label(sh)
-                    if cause:
-                        st.warning(f"🚫 Aún no imprimible: {cause}")
+                if sid:
+                    st.info(f"Shipment ID detectado: {sid}")
+                    sh = _meli_get_shipment(sid)
+                    if not sh:
+                        st.warning("⚠️ No se pudo leer el detalle del shipment.")
                     else:
-                        pdf = _download_label_pdf(sid)
-                        if pdf:
-                            st.success("🖨️ Etiqueta generada desde ME2.")
-                            # Upsert a Storage con el nombre 'asignacion'.pdf para que quede persistente
-                            url_pdf = upload_pdf_bytes_to_storage(asignacion, pdf)
-                            if url_pdf:
-                                # Actualiza el campo archivo_adjunto del registro
-                                try:
-                                    supabase.table(TABLE_NAME).update({"archivo_adjunto": url_pdf}).eq("guia", guia).execute()
-                                except Exception:
-                                    pass
-                                st.download_button(
-                                    label=f"📄 Descargar {asignacion}.pdf",
-                                    data=pdf,
-                                    file_name=f"{asignacion}.pdf",
-                                    mime="application/pdf",
-                                    use_container_width=True,
-                                )
-                            else:
-                                # Si por algo no sube a storage, igual permite descargar
-                                st.download_button(
-                                    label=f"📄 Descargar {asignacion}.pdf",
-                                    data=pdf,
-                                    file_name=f"{asignacion}.pdf",
-                                    mime="application/pdf",
-                                    use_container_width=True,
-                                )
-                            etiqueta_ok = True
+                        cause = _explicacion_estado_label(sh)
+                        if cause:
+                            st.warning(f"🚫 Aún no imprimible: {cause}")
                         else:
-                            st.warning("⚠️ ME2 no devolvió PDF. Revisa estado del envío.")
-            else:
-                st.info("ℹ️ No hay pack_id ni se pudo derivar shipment desde orden_meli.")
+                            pdf = _download_label_pdf(sid)
+                            if pdf:
+                                st.success("🖨️ Etiqueta generada desde ME2.")
+                                url_pdf = upload_pdf_bytes_to_storage(asignacion, pdf)
+                                if url_pdf:
+                                    try:
+                                        supabase.table(TABLE_NAME).update({"archivo_adjunto": url_pdf}).eq("guia", guia).execute()
+                                    except Exception:
+                                        pass
+                                    st.download_button(
+                                        label=f"📄 Descargar {asignacion}.pdf",
+                                        data=pdf,
+                                        file_name=f"{asignacion}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True,
+                                    )
+                                else:
+                                    st.download_button(
+                                        label=f"📄 Descargar {asignacion}.pdf",
+                                        data=pdf,
+                                        file_name=f"{asignacion}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True,
+                                    )
+                                etiqueta_ok = True
+                            else:
+                                st.warning("⚠️ ME2 no devolvió PDF. Revisa estado del envío.")
+                else:
+                    st.info("ℹ️ No hay pack_id ni se pudo derivar shipment desde orden_meli.")
+            except Exception as e:
+                st.warning(f"⚠️ No se pudo usar ME2: {e}")
 
         if not etiqueta_ok:
             st.warning("⚠️ No hay etiqueta PDF disponible aún para esta guía.")
 
-        # 3) Insertar un NUEVO registro para el log de impresión (aunque se repita)
+        # 3) Log de impresión (persistente)
         try:
             now = datetime.now(TZ).isoformat()
             supabase.table(TABLE_NAME).insert({
@@ -447,7 +430,6 @@ def process_scan(guia: str):
                 "pack_id": match.get("pack_id"),
             }).execute()
         except Exception:
-            # RLS estricta: si falla inserción del log, no rompe el flujo.
             pass
 
 # ==============================
@@ -476,10 +458,10 @@ def set_page(p: str):
     _set_page_param(p)
 
 # ==============================
-# ✅ BLOQUE ESTABLE — UI PRINCIPAL (NO MODIFICAR)
+# ✅ BLOQUE ESTABLE — UI PRINCIPAL (NO MODIFICAR) + (🔸 Añado botón PRUEBAS)
 # ==============================
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     if st.button("INGRESAR PAQUETES"):
         set_page("ingresar")
@@ -489,13 +471,22 @@ with col2:
 with col3:
     if st.button("🗃️ DATOS"):
         set_page("datos")
+with col4:
+    if st.button("🧪 PRUEBAS"):
+        set_page("pruebas")
 
-bg = {"ingresar": "#71A9D9", "imprimir": "#71D999", "datos": "#F2F4F4"}.get(st.session_state.page, "#F2F4F4")
+bg = {
+    "ingresar": "#71A9D9",
+    "imprimir": "#71D999",
+    "datos": "#F2F4F4",
+    "pruebas": "#FFE08A"
+}.get(st.session_state.page, "#F2F4F4")
 st.markdown(f"<style>.stApp{{background-color:{bg};}}</style>", unsafe_allow_html=True)
 
 st.header(
     "📦 INGRESAR PAQUETES" if st.session_state.page == "ingresar"
-    else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir" else "🗃️ DATOS")
+    else ("🖨️ IMPRIMIR GUIAS" if st.session_state.page == "imprimir"
+          else ("🗃️ DATOS" if st.session_state.page == "datos" else "🧪 PRUEBAS"))
 )
 
 # ==============================
@@ -734,7 +725,6 @@ if st.session_state.page == "datos":
     with colf2:
         page_size = st.selectbox("Filas por página", [25, 50, 100, 200], index=1)
     with colf4:
-        # Punto 1: Botón "Nuevo registro" restaurado
         if st.button("➕ Nuevo registro", use_container_width=True):
             open_modal_new()
 
@@ -750,7 +740,7 @@ if st.session_state.page == "datos":
     data_rows = datos_fetch(limit=page_size, offset=st.session_state.datos_offset, search=search)
     df_all = pd.DataFrame(data_rows)
 
-    # Punto 7: Filtro "Solo sin guía"
+    # Filtro "Solo sin guía"
     solo_sin_guia = st.checkbox("Solo sin guía", value=False)
     if solo_sin_guia and not df_all.empty and "guia" in df_all.columns:
         df_all = df_all[df_all["guia"].isna() | (df_all["guia"].astype(str).str.strip() == "")]
@@ -761,7 +751,7 @@ if st.session_state.page == "datos":
         show_cols = [c for c in ALL_COLUMNS if c in df_all.columns]
         df_all = df_all.copy()
 
-        # Punto 6: Columna EDITAR con ButtonColumn (sin checkbox)
+        # Columna EDITAR como ButtonColumn
         df_all["Editar"] = False
         has_button_col = hasattr(st, "column_config") and hasattr(st.column_config, "ButtonColumn")
         if has_button_col:
@@ -769,7 +759,6 @@ if st.session_state.page == "datos":
                 "Editar": st.column_config.ButtonColumn("Editar", help="Editar fila", icon="✏️", width="small")
             }
         else:
-            # Fallback si la versión no soporta ButtonColumn
             column_config = {"Editar": st.column_config.CheckboxColumn("Editar", help="Editar fila", default=False)}
 
         ordered_cols = ["Editar"] + show_cols
@@ -779,15 +768,12 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            disabled=show_cols,   # no permitir edición inline; usar modal
+            disabled=show_cols,
             column_config=column_config
         )
 
-        # Detectar fila solicitada para editar
         try:
             if "Editar" in edited_df.columns:
-                # tanto para ButtonColumn (True en la fila clickeada)
-                # como para Checkbox fallback
                 clicked = edited_df.index[edited_df["Editar"] == True].tolist()
                 if clicked:
                     idx = clicked[0]
@@ -798,3 +784,163 @@ if st.session_state.page == "datos":
             pass
 
     render_modal_if_needed()
+
+# ==============================
+# 🧪 NUEVA PÁGINA — PRUEBAS (NO TOCA LA BASE / DATOS)
+# ==============================
+
+def _mask(s: str, head=6, tail=4) -> str:
+    if not s:
+        return "-"
+    if len(s) <= head + tail:
+        return s[0:2] + "…"
+    return s[:head] + "…" + s[-tail:]
+
+if st.session_state.page == "pruebas":
+    st.markdown("### Conexión Mercado Libre")
+
+    app_id, client_secret, acc, ref = _read_secrets_block()
+    colT1, colT2, colT3, colT4 = st.columns(4)
+    colT1.metric("App ID", app_id or "—")
+    colT2.metric("Client Secret", _mask(client_secret or ""))
+    colT3.metric("Access Token", _mask(acc or ""))
+    colT4.metric("Refresh Token", _mask(ref or ""))
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("🔄 Probar users/me"):
+            try:
+                uid = _meli_get_user_id()
+                if uid:
+                    st.success(f"OK — user_id: {uid}")
+                else:
+                    st.error("Fallo users/me (revisa tokens).")
+            except Exception as e:
+                st.error(f"Error: {e}")
+    with c2:
+        if st.button("♻️ Forzar refresh token"):
+            try:
+                tok = _load_tokens()
+                if not tok.get("refresh_token"):
+                    st.warning("No hay refresh_token disponible en secrets o archivo.")
+                else:
+                    _refresh_access_token(tok)
+                    st.success("Refresh OK. Access token actualizado.")
+            except Exception as e:
+                st.error(f"Error al refrescar: {e}")
+    with c3:
+        if st.button("🔍 Mostrar access_token actual"):
+            try:
+                t = _get_access_token()
+                st.code(_mask(t, 12, 8))
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("---")
+    st.markdown("### Prueba de impresión de etiqueta (sin tocar la base)")
+    colI1, colI2, colI3 = st.columns(3)
+    with colI1:
+        input_shipment = st.text_input("shipment_id (opcional)", "")
+    with colI2:
+        input_order = st.text_input("order_id (opcional)", "")
+    with colI3:
+        input_pack = st.text_input("pack_id (opcional)", "")
+
+    colName1, colName2 = st.columns([2,1])
+    with colName1:
+        asignacion_test = st.text_input("asignación (para nombrar PDF si subes a Storage)", "")
+    with colName2:
+        subir_storage = st.checkbox("Subir a Storage", value=False)
+
+    colB1, colB2, colB3 = st.columns(3)
+    do_ready_btn = colB2.button("🚀 Marcar 'Ya tengo el producto' (ready_to_ship)")
+    probar_btn = colB1.button("🧪 Probar")
+    descargar_btn = colB3.button("⬇️ Descargar etiqueta")
+
+    st.caption("Secuencia: si no indicas shipment_id, intentamos derivarlo desde order_id o pack_id.")
+
+    # Estado compartido en pruebas
+    if "pruebas_sid" not in st.session_state:
+        st.session_state.pruebas_sid = None
+    if "pruebas_pdf" not in st.session_state:
+        st.session_state.pruebas_pdf = None
+
+    def _resolve_sid():
+        sid = (input_shipment or "").strip()
+        if sid:
+            return sid
+        if input_pack.strip():
+            sid = _shipment_id_from_pack(input_pack.strip())
+            if sid:
+                return sid
+        if input_order.strip():
+            sid = _shipment_id_from_order(input_order.strip())
+            if sid:
+                return sid
+        return None
+
+    if probar_btn:
+        try:
+            sid = _resolve_sid()
+            st.session_state.pruebas_sid = sid
+            if not sid:
+                st.warning("No se pudo resolver shipment_id.")
+            else:
+                st.info(f"Shipment ID: {sid}")
+                sh = _meli_get_shipment(sid)
+                if not sh:
+                    st.error("No se pudo leer /shipments/{id}.")
+                else:
+                    st.json({
+                        "status": sh.get("status"),
+                        "substatus": sh.get("substatus"),
+                        "logistic_mode": (sh.get("logistic") or {}).get("mode"),
+                        "logistic_type": (sh.get("logistic") or {}).get("type"),
+                    })
+                    cause = _explicacion_estado_label(sh)
+                    if cause:
+                        st.warning(f"No imprimible aún: {cause}")
+                    else:
+                        st.success("Imprimible ✅ (ready_to_ship + ready_to_print/printed)")
+                        pdf = _download_label_pdf(sid)
+                        if pdf:
+                            st.session_state.pruebas_pdf = pdf
+                            st.success("PDF obtenido. Puedes descargar o subir a Storage.")
+                        else:
+                            st.error("No se obtuvo PDF desde /shipment_labels.")
+        except Exception as e:
+            st.error(f"Error de prueba: {e}")
+
+    if do_ready_btn:
+        try:
+            sid = _resolve_sid()
+            if not sid:
+                st.warning("Primero indica o resuelve un shipment_id.")
+            else:
+                ok = _meli_ready_to_ship(sid)
+                st.success("Marcado como ready_to_ship.") if ok else st.error("No se pudo marcar ready_to_ship.")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    if descargar_btn:
+        try:
+            sid = st.session_state.pruebas_sid or _resolve_sid()
+            if not sid:
+                st.warning("Sin shipment_id.")
+            else:
+                pdf = st.session_state.pruebas_pdf or _download_label_pdf(sid)
+                if not pdf:
+                    st.error("No se obtuvo PDF.")
+                else:
+                    st.download_button("Descargar etiqueta (PDF)", data=pdf, file_name=f"{(asignacion_test or 'etiqueta')}.pdf", mime="application/pdf", use_container_width=True)
+                    if subir_storage:
+                        if not asignacion_test.strip():
+                            st.warning("Indica una asignación para subir a Storage.")
+                        else:
+                            url_pdf = upload_pdf_bytes_to_storage(asignacion_test.strip(), pdf)
+                            if url_pdf:
+                                st.success(f"Subido a Storage: {url_pdf}")
+                            else:
+                                st.error("Falló la subida a Storage.")
+        except Exception as e:
+            st.error(f"Error al descargar/subir: {e}")
