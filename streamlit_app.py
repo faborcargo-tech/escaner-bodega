@@ -700,18 +700,19 @@ if btn_test:
         if not sid:
             st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
         else:
-            pdf = _meli_download_label_pdf(sid, token_para_usar)
-            if pdf and pdf[:4] == b"%PDF":
-                st.success(f\"PDF OK (shipment_id={sid})\")
-                st.download_button(
-                    \"📄 Descargar etiqueta.pdf\",
-                    data=pdf,
-                    file_name=\"etiqueta.pdf\",
-                    mime=\"application/pdf\",
-                    use_container_width=True
-                )
-            else:
-                st.error(\"No se pudo descargar la etiqueta.\")
+pdf = _meli_download_label_pdf(sid, token_para_usar)
+if pdf and pdf[:4] == b"%PDF":
+    st.success(f"PDF OK (shipment_id={sid})")
+    st.download_button(
+        "📄 Descargar etiqueta.pdf",
+        data=pdf,
+        file_name="etiqueta.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
+else:
+    st.error("No se pudo descargar la etiqueta.")
+
 
 
     # === ML OAuth Panel END ===
