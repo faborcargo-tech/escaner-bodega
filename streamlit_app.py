@@ -652,64 +652,68 @@ if st.session_state.page == "datos":
                     st.success("✅ Tokens obtenidos.")
                     st.json(tokens)  # verás refresh_token en la respuesta
 
-        # --- Mostrar tokens y prueba de etiqueta ---
-        tokens = st.session_state.get("meli_tokens") or {}
-        access_token_val = tokens.get("access_token", "")
-        refresh_token_val = tokens.get("refresh_token", "")
-        user_id_val = tokens.get("user_id")
+    # --- Mostrar tokens (si disponibles) ---
+tokens = st.session_state.get("meli_tokens") or {}
+access_token_val = tokens.get("access_token", "")
+refresh_token_val = tokens.get("refresh_token", "")
+user_id_val = tokens.get("user_id")
 
-        if access_token_val or refresh_token_val:
-            st.write("**user_id:**", user_id_val)
-            st.text_area("access_token", value=access_token_val, height=90)
-            st.text_input("refresh_token (guárdalo en Secrets)", value=refresh_token_val)
+if access_token_val or refresh_token_val:
+    st.write("**user_id:**", user_id_val)
+    st.text_area("access_token", value=access_token_val, height=90)
+    st.text_input("refresh_token (guárdalo en Secrets)", value=refresh_token_val)
 
-            st.markdown("---")
-            st.write("### Prueba rápida de etiqueta")
-            order_id_test = st.text_input("order_id para probar", value="")
+    # (Opcional) Descargar tokens como JSON
+    buf = json.dumps({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "access_token": access_token_val,
+        "refresh_token": refresh_token_val,
+        "user_id": user_id_val,
+        "obtained_at": datetime.now(TZ).isoformat(),
+    }, ensure_ascii=False, indent=2).encode("utf-8")
+    st.download_button(
+        "💾 Descargar meli_tokens.json",
+        data=buf,
+        file_name="meli_tokens.json",
+        mime="application/json",
+        use_container_width=True
+    )
 
-            # Botón habilitado solo por tener order_id; token se obtiene automáticamente si hace falta
-            btn_test = st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip()))
-            if btn_test:
-                token_para_usar = access_token_val or _meli_get_access_token()
-                if not token_para_usar:
-                    st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
-                else:
-                    sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
-                    if not sid:
-                        st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
-                    else:
-                        pdf = _meli_download_label_pdf(sid, token_para_usar)
-                        if pdf and pdf[:4] == b"%PDF":
-                            st.success(f"PDF OK (shipment_id={sid})")
-                            st.download_button(
-                                "📄 Descargar etiqueta.pdf",
-                                data=pdf,
-                                file_name="etiqueta.pdf",
-                                mime="application/pdf",
-                                use_container_width=True
-                            )
-                        else:
-                            st.error("No se pudo descargar la etiqueta.")
+# --- Prueba rápida de etiqueta (SIEMPRE visible) ---
+st.markdown("---")
+st.write("### Prueba rápida de etiqueta")
+order_id_test = st.text_input("order_id para probar", value="", key="order_id_test_global")
 
-            # (Opcional) Descargar tokens como JSON
-            buf = json.dumps({
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "access_token": access_token_val,
-                "refresh_token": refresh_token_val,
-                "user_id": user_id_val,
-                "obtained_at": datetime.now(TZ).isoformat(),
-            }, ensure_ascii=False, indent=2).encode("utf-8")
-            st.download_button(
-                "💾 Descargar meli_tokens.json",
-                data=buf,
-                file_name="meli_tokens.json",
-                mime="application/json",
-                use_container_width=True
-            )
+btn_test = st.button("🔎 Probar descarga PDF",
+                     disabled=not bool(order_id_test.strip()),
+                     key="btn_test_pdf_global")
+
+if btn_test:
+    # Usa el access_token visible si lo hay; si no, renueva automáticamente con el refresh en Secrets
+    token_para_usar = access_token_val or _meli_get_access_token()
+    if not token_para_usar:
+        st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
+    else:
+        sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
+        if not sid:
+            st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
         else:
-            st.info("Primero obtén los tokens con el botón **Obtener tokens**.")
+            pdf = _meli_download_label_pdf(sid, token_para_usar)
+            if pdf and pdf[:4] == b\"%PDF\":
+                st.success(f\"PDF OK (shipment_id={sid})\")
+                st.download_button(
+                    \"📄 Descargar etiqueta.pdf\",
+                    data=pdf,
+                    file_name=\"etiqueta.pdf\",
+                    mime=\"application/pdf\",
+                    use_container_width=True
+                )
+            else:
+                st.error(\"No se pudo descargar la etiqueta.\")
+
+
     # === ML OAuth Panel END ===
 
     colf1, colf2, colf4 = st.columns([2,1,1])
