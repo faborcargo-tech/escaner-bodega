@@ -610,17 +610,28 @@ with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_stat
     state_in = colD.text_input("State recibido", value=_state)
 
     # --- Obtener tokens (code -> access/refresh) ---
+    # --- Forzar state si acabo de autorizar (bypass seguro para uso interno) ---
+forzar_state = st.checkbox("Confirmo que acabo de autorizar y quiero forzar el state")
+
+
     if st.button("🔄 Obtener tokens", use_container_width=True,
-                 disabled=not (client_id and client_secret and redirect_uri and code_in)):
-        st.session_state["meli_open"] = True  # mantener abierto
-        if state_in and state_in != st.session_state.meli_oauth_state:
-            st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
-        else:
-            tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
-            if tokens:
-                st.session_state.meli_tokens = tokens
-                st.success("✅ Tokens obtenidos.")
-                st.json(tokens)  # muestra refresh_token en la respuesta
+             disabled=not (client_id and client_secret and redirect_uri and code_in)):
+    st.session_state["meli_open"] = True  # mantener el expander abierto
+
+    # si NO marco 'forzar' y el state no coincide -> error
+    if (not forzar_state) and state_in and state_in != st.session_state.meli_oauth_state:
+        st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
+    else:
+        # si marco 'forzar', alineo el state en sesión con el recibido y sigo
+        if forzar_state and state_in:
+            st.session_state.meli_oauth_state = state_in
+
+        tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
+        if tokens:
+            st.session_state.meli_tokens = tokens
+            st.success("✅ Tokens obtenidos.")
+            st.json(tokens)  # se verá refresh_token en la respuesta
+
 
     # --- Mostrar tokens y prueba de etiqueta ---
     tokens = st.session_state.get("meli_tokens")
