@@ -47,13 +47,30 @@ def _exchange_code_for_tokens(client_id: str, client_secret: str, redirect_uri: 
         st.error(f"❌ Error al intercambiar code: {e}")
         return None
 
-def _meli_get_shipment_id_from_order(order_id: str, access_token: str) -> Optional[str]:
+def _meli_get_user_id(access_token: str) -> Optional[int]:
+    """Devuelve el id del usuario dueño del token."""
+    try:
+        r = requests.get(
+            f"{MELI_API_BASE}/users/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            js = r.json() or {}
+            return js.get("id")
+    except Exception:
+        pass
+    return None
+
+def _meli_get_shipment_id_from_order(order_id: str, access_token: str, user_id: Optional[int] = None) -> Optional[str]:
     """Obtiene shipment_id para una orden:
-       1) /orders/{id} (shipping.id)
-       2) /shipments/search?order_id={id}
-       3) /orders/{id}/shipments
+       1) /orders/{id} (shipping.id, pack_id)
+       2) /shipments/search?order_id={id}&seller={user_id}
+       3) /shipments/search?pack_id={pack_id}&seller={user_id}
+       4) /orders/{id}/shipments
     """
     headers = {"Authorization": f"Bearer {access_token}"}
+    pack_id = None
 
     # 1) /orders/{id}
     try:
@@ -62,19 +79,22 @@ def _meli_get_shipment_id_from_order(order_id: str, access_token: str) -> Option
             data = r.json() or {}
             shipping = data.get("shipping") or {}
             sid = shipping.get("id") or shipping.get("shipment_id")
+            pack_id = data.get("pack_id") or shipping.get("pack_id")
             if sid:
                 return str(sid)
     except Exception:
         pass
 
-    # 2) /shipments/search?order_id={id}
+    # Asegurar seller id (algunos filtros lo requieren)
+    if not user_id:
+        user_id = _meli_get_user_id(access_token)
+
+    # 2) /shipments/search?order_id=&seller=
     try:
-        r2 = requests.get(
-            f"{MELI_API_BASE}/shipments/search",
-            params={"order_id": order_id},
-            headers=headers,
-            timeout=20,
-        )
+        params = {"order_id": order_id}
+        if user_id:
+            params["seller"] = user_id
+        r2 = requests.get(f"{MELI_API_BASE}/shipments/search", params=params, headers=headers, timeout=20)
         if r2.status_code == 200:
             js = r2.json() or {}
             results = js.get("results") or js.get("shipments") or []
@@ -86,11 +106,29 @@ def _meli_get_shipment_id_from_order(order_id: str, access_token: str) -> Option
     except Exception:
         pass
 
-    # 3) /orders/{id}/shipments
+    # 3) si hay pack_id, buscar por pack_id (con seller si se tiene)
+    if pack_id:
+        try:
+            params = {"pack_id": pack_id}
+            if user_id:
+                params["seller"] = user_id
+            r3 = requests.get(f"{MELI_API_BASE}/shipments/search", params=params, headers=headers, timeout=20)
+            if r3.status_code == 200:
+                js = r3.json() or {}
+                results = js.get("results") or js.get("shipments") or []
+                if isinstance(results, list) and results:
+                    first = results[0]
+                    sid = first.get("id") if isinstance(first, dict) else first
+                    if sid:
+                        return str(sid)
+        except Exception:
+            pass
+
+    # 4) /orders/{id}/shipments
     try:
-        r3 = requests.get(f"{MELI_API_BASE}/orders/{order_id}/shipments", headers=headers, timeout=20)
-        if r3.status_code == 200:
-            js = r3.json() or []
+        r4 = requests.get(f"{MELI_API_BASE}/orders/{order_id}/shipments", headers=headers, timeout=20)
+        if r4.status_code == 200:
+            js = r4.json() or []
             if isinstance(js, list) and js:
                 first = js[0]
                 sid = first.get("id") if isinstance(first, dict) else first
@@ -130,7 +168,7 @@ MELI_ENABLED = all([MELI_CLIENT_ID, MELI_CLIENT_SECRET, MELI_REFRESH_TOKEN])
 
 def _meli_get_access_token() -> Optional[str]:
     """Renueva y cachea access_token usando el refresh guardado en Secrets o el último rotado.
-       - Actualiza el refresh_token automáticamente EN MEMORIA.
+       - Actualiza el refresh_token automáticamente EN MEMORIA para la sesión.
        - Evita mostrar el aviso más de una vez por sesión.
     """
     if not MELI_ENABLED:
@@ -181,7 +219,13 @@ def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
     if order_id:
         token = _meli_get_access_token()
         if token:
-            sid = _meli_get_shipment_id_from_order(order_id, token)
+            # cachear seller id en sesión para no pedirlo cada vez
+            uid = st.session_state.get("meli_seller_id")
+            if not uid:
+                uid = _meli_get_user_id(token)
+                if uid:
+                    st.session_state["meli_seller_id"] = uid
+            sid = _meli_get_shipment_id_from_order(order_id, token, user_id=uid)
             if sid:
                 pdf = _meli_download_label_pdf(sid, token)
                 if pdf:
@@ -750,7 +794,10 @@ if st.session_state.page == "datos":
             if not token_para_usar:
                 st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
             else:
-                sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
+                uid = tokens.get("user_id") or st.session_state.get("meli_seller_id") or _meli_get_user_id(token_para_usar)
+                if uid:
+                    st.session_state["meli_seller_id"] = uid
+                sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar, user_id=uid)
                 if not sid:
                     st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
                 else:
