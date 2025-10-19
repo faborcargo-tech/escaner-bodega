@@ -119,7 +119,7 @@ def get_logs(page: str):
     return res.data or []
 
 # ==============================
-# MERCADO LIBRE (CHILE) - AUTH + API
+# MERCADO LIBRE - AUTH + API
 # ==============================
 ML_AUTH_HOST = "https://auth.mercadolibre.cl"
 ML_API = "https://api.mercadolibre.com"
@@ -251,13 +251,39 @@ def derive_shipment_id(order_id: str, pack_id: str) -> Optional[str]:
 
 def download_label_pdf(shipment_id: str) -> bytes:
     r = meli_get("/shipment_labels", params={"shipment_ids": shipment_id, "response_type": "pdf"}, raw=True)
-    # meli_get con raw=True devuelve requests.Response
     if hasattr(r, "status_code") and r.status_code == 200:
         return r.content
     raise RuntimeError(f"Labels -> {getattr(r, 'status_code', '???')}")
 
 def mark_ready_to_ship(shipment_id: str):
     return meli_post(f"/shipments/{shipment_id}/process/ready_to_ship", json_body={})
+
+# --- Captura global del parámetro ?code=... (funciona en cualquier página)
+def _capture_oauth_code_if_present():
+    try:
+        qp = st.query_params
+        code_from_url = qp.get("code", [None])[0]
+        state = qp.get("state", [None])[0]
+        current_page = qp.get("page", [st.session_state.page])[0]
+    except Exception:
+        qp = st.experimental_get_query_params()
+        code_from_url = qp.get("code", [None])[0]
+        state = qp.get("state", [None])[0]
+        current_page = qp.get("page", [st.session_state.page])[0]
+
+    if code_from_url:
+        tok = meli_exchange_code_for_tokens(code_from_url)
+        if tok:
+            st.success("¡Conexión lista! Tokens guardados.")
+        else:
+            st.error("No se pudo intercambiar el code. Reintenta reconectar.")
+        # limpiar URL y mantener la página actual
+        try:
+            st.query_params["page"] = current_page
+        except Exception:
+            st.experimental_set_query_params(page=current_page)
+
+_capture_oauth_code_if_present()
 
 # ==============================
 # SCAN FLOW (NO CAMBIAR)
@@ -298,7 +324,7 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
 
-        # log persistente (inserción)
+        # log persistente
         try:
             now = datetime.now(TZ).isoformat()
             supabase.table(TABLE_NAME).insert({
@@ -659,7 +685,7 @@ if st.session_state.page == "datos":
     render_modal_if_needed()
 
 # ==============================
-# PAGE: PRUEBAS (NUEVO - incluye Reconectar OAuth)
+# PAGE: PRUEBAS
 # ==============================
 if st.session_state.page == "pruebas":
     st.subheader("Prueba de impresión de etiqueta (no toca la base)")
@@ -685,7 +711,6 @@ if st.session_state.page == "pruebas":
                     if not sid:
                         st.error("No se encontró shipment_id (¿order/pack correctos y visibles con este token?).")
                         st.stop()
-                # (opcional) ready_to_ship check de estado: no se fuerza aquí
                 pdf_bytes = download_label_pdf(sid)
                 if pdf_bytes[:4] != b"%PDF":
                     st.error("La respuesta no parece un PDF válido.")
@@ -696,8 +721,7 @@ if st.session_state.page == "pruebas":
                     if not asignacion.strip():
                         st.warning("Para subir a Storage, completa 'asignación'.")
                     else:
-                        # simular subida desde bytes
-                        class _B:  # mini wrapper para .read()
+                        class _B:
                             def __init__(self, b): self._b=b
                             def read(self): return self._b
                         url_pdf = upload_pdf_to_storage(asignacion.strip(), _B(pdf_bytes))
@@ -722,7 +746,7 @@ if st.session_state.page == "pruebas":
             except Exception as e:
                 st.error(str(e))
 
-    # ----- Credenciales locales / Reconexión -----
+    # ----- Credenciales / Reconexión -----
     with st.expander("🔐 Cargar/gestionar credenciales locales (opcional)", expanded=False):
         ml = st.session_state.meli_local
         ml["client_id"] = st.text_input("App ID", ml.get("client_id",""))
@@ -751,7 +775,6 @@ if st.session_state.page == "pruebas":
                     st.error("No se pudo refrescar el token.")
 
         st.divider()
-        # ---- Reconectar (OAuth Authorization Code) ----
         st.markdown("**Conectar/Reconectar con Mercado Libre (OAuth)**")
         if ml["client_id"] and ml["redirect_uri"]:
             auth_url = meli_oauth_url(ml["client_id"], ml["redirect_uri"], state="stk")
@@ -759,22 +782,6 @@ if st.session_state.page == "pruebas":
         else:
             st.info("Completa App ID y Redirect URI para mostrar el botón de conexión.")
 
-        # Si volvimos con ?code=...
-        try:
-            qp = st.query_params
-            code_from_url = qp.get("code", [None])[0]
-        except Exception:
-            qp = st.experimental_get_query_params()
-            code_from_url = qp.get("code", [None])[0]
-        if code_from_url:
-            st.info("Intercambiando 'code' por tokens...")
-            tok = meli_exchange_code_for_tokens(code_from_url)
-            if tok:
-                st.success("¡Conexión lista! Tokens guardados.")
-            else:
-                st.error("No se pudo intercambiar el code. Reintenta reconectar.")
-
         # Mostrar expiración estimada
         exp_in = max(0, st.session_state.meli_local.get("expires_at", 0) - _now_epoch())
         st.caption(f"Access token expira en ~{exp_in} segundos.")
-
