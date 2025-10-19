@@ -625,6 +625,7 @@ if "meli_oauth_state" not in st.session_state:
             if tokens:
                 st.session_state.meli_tokens = tokens
                 st.success("✅ Tokens obtenidos.")
+                st.json(tokens)
 
     # Mostrar/descargar tokens y prueba rápida de etiqueta
     tokens = st.session_state.get("meli_tokens")
