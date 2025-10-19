@@ -81,6 +81,71 @@ def _meli_download_label_pdf(shipment_id: str, access_token: str) -> Optional[by
     return None
 
 
+# ====== AUTO-REFRESH ACCESS TOKEN (usa secrets) ======
+MELI_CLIENT_ID = (st.secrets.get("MELI_CLIENT_ID") or "").strip()
+MELI_CLIENT_SECRET = (st.secrets.get("MELI_CLIENT_SECRET") or "").strip()
+MELI_REDIRECT_URI = (st.secrets.get("MELI_REDIRECT_URI") or "").strip()
+MELI_REFRESH_TOKEN = (st.secrets.get("MELI_REFRESH_TOKEN") or "").strip()
+MELI_ENABLED = all([MELI_CLIENT_ID, MELI_CLIENT_SECRET, MELI_REFRESH_TOKEN])
+
+def _meli_get_access_token() -> Optional[str]:
+    """Renueva y cachea access_token con el refresh guardado en st.secrets."""
+    if not MELI_ENABLED:
+        return None
+    now = int(time.time())
+    cache = st.session_state.get("meli_rt_cache") or {}
+    if cache.get("access_token") and cache.get("exp", 0) > now + 60:
+        return cache["access_token"]
+    try:
+        r = requests.post(
+            f"{MELI_API_BASE}/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": MELI_CLIENT_ID,
+                "client_secret": MELI_CLIENT_SECRET,
+                "refresh_token": MELI_REFRESH_TOKEN,
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        at = j.get("access_token")
+        exp = int(j.get("expires_in", 3600))
+        st.session_state["meli_rt_cache"] = {"access_token": at, "exp": now + exp}
+        # Avisar si ML rotó el refresh_token (para que lo actualices en Secrets)
+        new_rt = j.get("refresh_token")
+        if new_rt and new_rt != MELI_REFRESH_TOKEN:
+            st.info("ℹ️ Mercado Libre emitió un refresh_token nuevo. Actualízalo en Secrets para persistirlo.")
+        return at
+    except Exception:
+        return None
+
+def _obtener_pdf_etiqueta(match: dict) -> Optional[bytes]:
+    """Intenta descargar la etiqueta desde ML usando orden_meli; si falla, usa archivo_adjunto."""
+    # 1) Mercado Libre (si hay orden_meli y secrets)
+    order_id = (match.get("orden_meli") or "").strip()
+    if order_id:
+        token = _meli_get_access_token()
+        if token:
+            sid = _meli_get_shipment_id_from_order(order_id, token)
+            if sid:
+                pdf = _meli_download_label_pdf(sid, token)
+                if pdf:
+                    return pdf
+    # 2) Respaldo: URL pública en Supabase (archivo_adjunto)
+    archivo_public = match.get("archivo_adjunto") or ""
+    if archivo_public and url_disponible(archivo_public):
+        try:
+            pdf_bytes = requests.get(archivo_public, timeout=10).content
+            if pdf_bytes[:4] == b"%PDF":
+                return pdf_bytes
+        except Exception:
+            pass
+    return None
+
+
+
 # ==============================
 # ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
 # - Centraliza URL/KEY de Supabase y parámetros base.
@@ -644,23 +709,29 @@ if st.session_state.page == "datos":
             st.write("### Prueba rápida de etiqueta")
             order_id_test = st.text_input("order_id para probar", value="")
 
-            if st.button("🔎 Probar descarga PDF", disabled=not (order_id_test and access_token_val)):
-                sid = _meli_get_shipment_id_from_order(order_id_test.strip(), access_token_val)
-                if not sid:
-                    st.error("No se encontró shipment_id (¿es Mercado Envíos / lista para imprimir?).")
-                else:
-                    pdf = _meli_download_label_pdf(sid, access_token_val)
-                    if pdf and pdf[:4] == b"%PDF":
-                        st.success(f"PDF OK (shipment_id={sid})")
-                        st.download_button(
-                            "📄 Descargar etiqueta.pdf",
-                            data=pdf,
-                            file_name="etiqueta.pdf",
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-                    else:
-                        st.error("No se pudo descargar la etiqueta.")
+            if st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip())):
+    # Usa el token visible o renueva automáticamente con el refresh de st.secrets
+    token_para_usar = access_token_val or _meli_get_access_token()
+    if not token_para_usar:
+        st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
+    else:
+        sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
+        if not sid:
+            st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
+        else:
+            pdf = _meli_download_label_pdf(sid, token_para_usar)
+            if pdf and pdf[:4] == b"%PDF":
+                st.success(f"PDF OK (shipment_id={sid})")
+                st.download_button(
+                    "📄 Descargar etiqueta.pdf",
+                    data=pdf,
+                    file_name="etiqueta.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            else:
+                st.error("No se pudo descargar la etiqueta.")
+
 
             # (Opcional) Descargar tokens como JSON
             import json
