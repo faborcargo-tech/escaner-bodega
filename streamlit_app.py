@@ -567,13 +567,34 @@ with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=False):
 
     redirect_uri = st.text_input("Redirect URI", value=st.secrets.get("MELI_REDIRECT_URI", ""))
 
-    # STATE anti-CSRF
-    if "meli_oauth_state" not in st.session_state:
+    # --- STATE anti-CSRF FIJADO EN LA URL PARA QUE NO CAMBIE EN RECARGAS ---
+
+# 1) Leer los query params actuales
+try:
+    _qp = st.query_params
+except Exception:
+    _qp = st.experimental_get_query_params()
+
+# 2) Si no hay state en sesión, intenta tomarlo desde la URL (meli_state).
+#    Si tampoco existe, genera uno NUEVO y lo "pinchas" en la URL.
+if "meli_oauth_state" not in st.session_state:
+    # puede venir como string o lista
+    _state_qp = (_qp.get("meli_state") or [""])[0] if isinstance(_qp.get("meli_state"), list) else _qp.get("meli_state", "")
+    if _state_qp:
+        st.session_state.meli_oauth_state = _state_qp
+    else:
         st.session_state.meli_oauth_state = pysecrets.token_urlsafe(16)
+        # insertar/actualizar el parámetro meli_state en la URL actual
+        try:
+            st.query_params["meli_state"] = st.session_state.meli_oauth_state
+        except Exception:
+            st.experimental_set_query_params(**{**_qp, "meli_state": st.session_state.meli_oauth_state})
+
 
     # Link de autorización
     if client_id and redirect_uri:
         auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
+
         if hasattr(st, "link_button"):
             st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
         else:
