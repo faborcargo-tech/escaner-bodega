@@ -556,91 +556,80 @@ def render_modal_if_needed():
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
 
-    # 🔐 Conectar Mercado Libre (OAuth) – asistente en la nube
-st.session_state.setdefault("meli_open", True)  # que quede abierto mientras conectas
-with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_state["meli_open"]):
-    st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; al final descarga un JSON con los tokens.")
+  # Mantener el expander abierto mientras conectas
+st.session_state.setdefault("meli_open", True)
 
-    # Credenciales desde secrets (editable por si quieres probar con otra app)
+with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=st.session_state["meli_open"]):
+    st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; descarga un JSON con los tokens.")
+
+    # --- Credenciales (desde secrets, editables) ---
     colA, colB = st.columns(2)
     client_id = colA.text_input("Client ID", value=st.secrets.get("MELI_CLIENT_ID", ""))
     client_secret = colB.text_input("Client Secret", type="password", value=st.secrets.get("MELI_CLIENT_SECRET", ""))
-
     redirect_uri = st.text_input("Redirect URI", value=st.secrets.get("MELI_REDIRECT_URI", ""))
 
-    # --- STATE anti-CSRF FIJADO EN LA URL PARA QUE NO CAMBIE EN RECARGAS ---
+    # --- STATE anti-CSRF FIJADO EN LA URL ---
+    try:
+        _qp = st.query_params
+    except Exception:
+        _qp = st.experimental_get_query_params()
 
-# 1) Leer los query params actuales
-try:
-    _qp = st.query_params
-except Exception:
-    _qp = st.experimental_get_query_params()
+    if "meli_oauth_state" not in st.session_state:
+        _state_qp = (_qp.get("meli_state") or [""])[0] if isinstance(_qp.get("meli_state"), list) else _qp.get("meli_state", "")
+        if _state_qp:
+            st.session_state.meli_oauth_state = _state_qp
+        else:
+            import secrets as pysecrets
+            st.session_state.meli_oauth_state = pysecrets.token_urlsafe(16)
+            try:
+                st.query_params["meli_state"] = st.session_state.meli_oauth_state
+            except Exception:
+                st.experimental_set_query_params(**{**_qp, "meli_state": st.session_state.meli_oauth_state})
 
-# 2) Si no hay state en sesión, intenta tomarlo desde la URL (meli_state).
-#    Si tampoco existe, genera uno NUEVO y lo "pinchas" en la URL.
-if "meli_oauth_state" not in st.session_state:
-    # puede venir como string o lista
-    _state_qp = (_qp.get("meli_state") or [""])[0] if isinstance(_qp.get("meli_state"), list) else _qp.get("meli_state", "")
-    if _state_qp:
-        st.session_state.meli_oauth_state = _state_qp
-    else:
-        st.session_state.meli_oauth_state = pysecrets.token_urlsafe(16)
-        # insertar/actualizar el parámetro meli_state en la URL actual
-        try:
-            st.query_params["meli_state"] = st.session_state.meli_oauth_state
-        except Exception:
-            st.experimental_set_query_params(**{**_qp, "meli_state": st.session_state.meli_oauth_state})
-
-
-    # Link de autorización
-   if client_id and redirect_uri:
-    auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
-
-    st.session_state["meli_open"] = True        # ← AQUÍ (antes del botón/enlace)
-
-    if hasattr(st, "link_button"):
-        st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
-    else:
-        st.markdown(f"[➡️ Autorizar en Mercado Libre]({auth_url})")
-
+    # --- Link de autorización ---
+    if client_id and redirect_uri:
+        auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
+        st.session_state["meli_open"] = True  # mantener abierto
+        if hasattr(st, "link_button"):
+            st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
+        else:
+            st.markdown(f"[➡️ Autorizar en Mercado Libre]({auth_url})")
 
     st.divider()
 
-    # Capturar ?code y ?state si regresaste a esta misma URL
+    # --- Capturar ?code y ?state devueltos por ML ---
     try:
-        qp = st.query_params
-        _code = qp.get("code", [""])[0] if isinstance(qp.get("code"), list) else qp.get("code", "")
-        _state = qp.get("state", [""])[0] if isinstance(qp.get("state"), list) else qp.get("state", "")
+        _qp = st.query_params
     except Exception:
-        qp = st.experimental_get_query_params()
-        _code = (qp.get("code") or [""])[0]
-        _state = (qp.get("state") or [""])[0]
+        _qp = st.experimental_get_query_params()
+    _code = (_qp.get("code") or [""])[0] if isinstance(_qp.get("code"), list) else _qp.get("code", "")
+    _state = (_qp.get("state") or [""])[0] if isinstance(_qp.get("state"), list) else _qp.get("state", "")
 
     colC, colD = st.columns(2)
     code_in = colC.text_input("Code (si no volvió automático, pégalo aquí)", value=_code)
     state_in = colD.text_input("State recibido", value=_state)
 
-    # Intercambio code -> tokens
+    # --- Obtener tokens (code -> access/refresh) ---
     if st.button("🔄 Obtener tokens", use_container_width=True,
-             disabled=not (client_id and client_secret and redirect_uri and code_in)):
-    st.session_state["meli_open"] = True  # mantener abierto
-    if state_in and state_in != st.session_state.meli_oauth_state:
-        st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
-    else:
-        tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
-        if tokens:
-            st.session_state.meli_tokens = tokens
-            st.success("✅ Tokens obtenidos.")
-            st.json(tokens)  # ← AQUI: verás refresh_token en la respuesta
+                 disabled=not (client_id and client_secret and redirect_uri and code_in)):
+        st.session_state["meli_open"] = True  # mantener abierto
+        if state_in and state_in != st.session_state.meli_oauth_state:
+            st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
+        else:
+            tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
+            if tokens:
+                st.session_state.meli_tokens = tokens
+                st.success("✅ Tokens obtenidos.")
+                st.json(tokens)  # muestra refresh_token en la respuesta
 
-
-    # Mostrar/descargar tokens y prueba rápida de etiqueta
+    # --- Mostrar tokens y prueba de etiqueta ---
     tokens = st.session_state.get("meli_tokens")
     if tokens:
         access_token = tokens.get("access_token", "")
         refresh_token = tokens.get("refresh_token", "")
-        st.text_area("access_token", value=access_token, height=100)
-        st.text_input("refresh_token (guárdalo; va a st.secrets)", value=refresh_token)
+        st.text_area("access_token", value=access_token, height=90)
+        st.text_input("refresh_token (guárdalo en Secrets)", value=refresh_token)
+
 
         st.markdown("---")
         st.write("### Prueba rápida de etiqueta")
