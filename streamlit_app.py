@@ -286,28 +286,27 @@ def process_scan(guia: str):
         st.success(f"📦 Guía {guia} ingresada correctamente.")
         return
 
-    # MODO IMPRIMIR (sin auto-abrir PDF)
+    # MODO IMPRIMIR (prioriza Mercado Libre; cae a respaldo)
     if st.session_state.page == "imprimir":
         update_impresion(guia)
 
-        archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
+        archivo_public = match.get("archivo_adjunto") or ""
 
         # 1) Intentar con Mercado Libre (auto-refresh) y caer a respaldo
-pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh en secrets; si falla, usa archivo_adjunto
+        pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh en secrets; si falla, usa archivo_adjunto
 
-if pdf_bytes and pdf_bytes[:4] == b"%PDF":
-    st.success(f"🖨️ Etiqueta {asignacion} lista (prioridad Mercado Libre).")
-    st.download_button(
-        label=f"📄 Imprimir {asignacion}.pdf",
-        data=pdf_bytes,
-        file_name=f"{asignacion}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
-else:
-    st.warning("⚠️ No se pudo obtener la etiqueta desde Mercado Libre ni desde el respaldo.")
-
+        if pdf_bytes and pdf_bytes[:4] == b"%PDF":
+            st.success(f"🖨️ Etiqueta {asignacion} lista (prioridad Mercado Libre).")
+            st.download_button(
+                label=f"📄 Imprimir {asignacion}.pdf",
+                data=pdf_bytes,
+                file_name=f"{asignacion}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.warning("⚠️ No se pudo obtener la etiqueta desde Mercado Libre ni desde el respaldo.")
 
         # 2) Insertar un NUEVO registro para el log de impresión (aunque se repita)
         try:
@@ -330,6 +329,7 @@ else:
         except Exception:
             # RLS estricta: si falla inserción del log, no rompe el flujo.
             pass
+
 
 
 # ==============================
