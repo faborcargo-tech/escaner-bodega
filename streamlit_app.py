@@ -6,6 +6,81 @@ import pytz
 import requests
 import time
 
+# --- MERCADO LIBRE: helpers mínimos para OAuth + etiqueta ---
+from typing import Optional
+import json, base64, secrets as pysecrets
+
+MELI_API_BASE = "https://api.mercadolibre.com"
+
+def _build_auth_url(client_id: str, redirect_uri: str, state: str, scopes: list[str] = None) -> str:
+    scopes = scopes or ["offline_access", "read", "write"]
+    scope_str = "%20".join(scopes)
+    return (
+        "https://auth.mercadolibre.com/authorization"
+        f"?response_type=code&client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope={scope_str}"
+        f"&state={state}"
+    )
+
+def _exchange_code_for_tokens(client_id: str, client_secret: str, redirect_uri: str, code: str) -> Optional[dict]:
+    try:
+        r = requests.post(
+            f"{MELI_API_BASE}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            st.error(f"❌ Intercambio de code falló ({r.status_code}): {r.text[:500]}")
+            return None
+        return r.json()
+    except Exception as e:
+        st.error(f"❌ Error al intercambiar code: {e}")
+        return None
+
+def _meli_get_shipment_id_from_order(order_id: str, access_token: str) -> Optional[str]:
+    try:
+        r = requests.get(
+            f"{MELI_API_BASE}/orders/{order_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        shipping = data.get("shipping") or {}
+        sid = shipping.get("id") or shipping.get("shipment_id")
+        return str(sid) if sid else None
+    except Exception:
+        return None
+
+def _meli_download_label_pdf(shipment_id: str, access_token: str) -> Optional[bytes]:
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/pdf"}
+    # batch
+    try:
+        url = f"{MELI_API_BASE}/shipment_labels?shipment_ids={shipment_id}&response_type=pdf"
+        r = requests.get(url, headers=headers, timeout=25)
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            return r.content
+    except Exception:
+        pass
+    # individual
+    try:
+        url2 = f"{MELI_API_BASE}/shipments/{shipment_id}/labels?response_type=pdf"
+        r2 = requests.get(url2, headers=headers, timeout=25)
+        if r2.status_code == 200 and r2.content[:4] == b"%PDF":
+            return r2.content
+    except Exception:
+        pass
+    return None
+
+
 # ==============================
 # ✅ BLOQUE ESTABLE — CONFIGURACIÓN GENERAL (NO MODIFICAR)
 # - Centraliza URL/KEY de Supabase y parámetros base.
@@ -480,6 +555,90 @@ def render_modal_if_needed():
 # ---- Página DATOS
 if st.session_state.page == "datos":
     st.markdown("### Base de datos")
+
+    # 🔐 Conectar Mercado Libre (OAuth) – asistente en la nube
+with st.expander("🔐 Conectar Mercado Libre (OAuth)", expanded=False):
+    st.caption("Autoriza tu cuenta principal. Nada se guarda en disco; al final descarga un JSON con los tokens.")
+
+    # Credenciales desde secrets (editable por si quieres probar con otra app)
+    colA, colB = st.columns(2)
+    client_id = colA.text_input("Client ID", value=st.secrets.get("MELI_CLIENT_ID", ""))
+    client_secret = colB.text_input("Client Secret", type="password", value=st.secrets.get("MELI_CLIENT_SECRET", ""))
+
+    redirect_uri = st.text_input("Redirect URI", value=st.secrets.get("MELI_REDIRECT_URI", ""))
+
+    # STATE anti-CSRF
+    if "meli_oauth_state" not in st.session_state:
+        st.session_state.meli_oauth_state = pysecrets.token_urlsafe(16)
+
+    # Link de autorización
+    if client_id and redirect_uri:
+        auth_url = _build_auth_url(client_id, redirect_uri, st.session_state.meli_oauth_state)
+        if hasattr(st, "link_button"):
+            st.link_button("➡️ Autorizar en Mercado Libre", auth_url, use_container_width=True)
+        else:
+            st.markdown(f"[➡️ Autorizar en Mercado Libre]({auth_url})")
+
+    st.divider()
+
+    # Capturar ?code y ?state si regresaste a esta misma URL
+    try:
+        qp = st.query_params
+        _code = qp.get("code", [""])[0] if isinstance(qp.get("code"), list) else qp.get("code", "")
+        _state = qp.get("state", [""])[0] if isinstance(qp.get("state"), list) else qp.get("state", "")
+    except Exception:
+        qp = st.experimental_get_query_params()
+        _code = (qp.get("code") or [""])[0]
+        _state = (qp.get("state") or [""])[0]
+
+    colC, colD = st.columns(2)
+    code_in = colC.text_input("Code (si no volvió automático, pégalo aquí)", value=_code)
+    state_in = colD.text_input("State recibido", value=_state)
+
+    # Intercambio code -> tokens
+    if st.button("🔄 Obtener tokens", use_container_width=True, disabled=not (client_id and client_secret and redirect_uri and code_in)):
+        if state_in and state_in != st.session_state.meli_oauth_state:
+            st.error("El parámetro state no coincide. Genera un nuevo enlace y vuelve a autorizar.")
+        else:
+            tokens = _exchange_code_for_tokens(client_id, client_secret, redirect_uri, code_in)
+            if tokens:
+                st.session_state.meli_tokens = tokens
+                st.success("✅ Tokens obtenidos.")
+
+    # Mostrar/descargar tokens y prueba rápida de etiqueta
+    tokens = st.session_state.get("meli_tokens")
+    if tokens:
+        access_token = tokens.get("access_token", "")
+        refresh_token = tokens.get("refresh_token", "")
+        st.text_area("access_token", value=access_token, height=100)
+        st.text_input("refresh_token (guárdalo; va a st.secrets)", value=refresh_token)
+
+        st.markdown("---")
+        st.write("### Prueba rápida de etiqueta")
+        order_id_test = st.text_input("order_id para probar", value="")
+        if st.button("🔎 Probar descarga PDF", disabled=not (order_id_test and access_token)):
+            sid = _meli_get_shipment_id_from_order(order_id_test.strip(), access_token)
+            if not sid:
+                st.error("No se encontró shipment_id (¿es Mercado Envíos / lista para imprimir?).")
+            else:
+                pdf = _meli_download_label_pdf(sid, access_token)
+                if pdf and pdf[:4] == b"%PDF":
+                    st.success(f"PDF OK (shipment_id={sid})")
+                    st.download_button("📄 Descargar etiqueta.pdf", data=pdf, file_name="etiqueta.pdf", mime="application/pdf", use_container_width=True)
+                else:
+                    st.error("No se pudo descargar la etiqueta.")
+
+        buf = json.dumps({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "obtained_at": datetime.now(TZ).isoformat(),
+        }, ensure_ascii=False, indent=2).encode("utf-8")
+
+        st.download_button("💾 Descargar meli_tokens.json", data=buf, file_name="meli_tokens.json", mime="application/json", use_container_width=True)
+
 
     colf1, colf2, colf4 = st.columns([2,1,1])
     with colf1:
