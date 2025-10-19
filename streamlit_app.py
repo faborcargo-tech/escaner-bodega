@@ -729,6 +729,24 @@ if st.session_state.page == "pruebas":
 if st.session_state.page == "pruebas":
     st.subheader("Prueba de impresión de etiqueta (no toca la base)")
 
+# ============================================================
+# 🧩 CAMPO TEMPORAL PARA PEGAR ACCESS_TOKEN MANUALMENTE
+# ============================================================
+st.markdown("#### Token manual (solo para pruebas)")
+token_manual = st.text_input(
+    "Access Token generado externamente (Postman / OAuth manual)",
+    value=st.session_state.meli.get("access_token", ""),
+    type="password",
+    help="Pega aquí un access_token válido de Mercado Libre Chile (ME2)."
+)
+if token_manual.strip():
+    st.session_state.meli["access_token"] = token_manual.strip()
+    st.success("✅ Token manual cargado en sesión. Ahora puedes probar imprimir la etiqueta.")
+else:
+    st.info("Pega tu token manual arriba o conecta con Mercado Libre más abajo.")
+st.markdown("---")
+
+
     colI, colO, colP = st.columns([1, 2, 1])
     shipment_id_input = colI.text_input("shipment_id (opcional)")
     order_id_input = colO.text_input("order_id (opcional)")
