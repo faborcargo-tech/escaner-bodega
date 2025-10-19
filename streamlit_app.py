@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 import requests
 import time
-from typing import Optional
+from typing import Optional, List
 import json
 import secrets as pysecrets
 
@@ -15,7 +15,7 @@ import secrets as pysecrets
 
 MELI_API_BASE = "https://api.mercadolibre.com"
 
-def _build_auth_url(client_id: str, redirect_uri: str, state: str, scopes: list[str] | None = None) -> str:
+def _build_auth_url(client_id: str, redirect_uri: str, state: str, scopes: Optional[List[str]] = None) -> str:
     scopes = scopes or ["offline_access", "read", "write"]
     scope_str = "%20".join(scopes)
     return (
@@ -48,20 +48,58 @@ def _exchange_code_for_tokens(client_id: str, client_secret: str, redirect_uri: 
         return None
 
 def _meli_get_shipment_id_from_order(order_id: str, access_token: str) -> Optional[str]:
+    """Obtiene shipment_id para una orden:
+       1) /orders/{id} (shipping.id)
+       2) /shipments/search?order_id={id}
+       3) /orders/{id}/shipments
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # 1) /orders/{id}
     try:
-        r = requests.get(
-            f"{MELI_API_BASE}/orders/{order_id}",
-            headers={"Authorization": f"Bearer {access_token}"},
+        r = requests.get(f"{MELI_API_BASE}/orders/{order_id}", headers=headers, timeout=20)
+        if r.status_code == 200:
+            data = r.json() or {}
+            shipping = data.get("shipping") or {}
+            sid = shipping.get("id") or shipping.get("shipment_id")
+            if sid:
+                return str(sid)
+    except Exception:
+        pass
+
+    # 2) /shipments/search?order_id={id}
+    try:
+        r2 = requests.get(
+            f"{MELI_API_BASE}/shipments/search",
+            params={"order_id": order_id},
+            headers=headers,
             timeout=20,
         )
-        if r.status_code != 200:
-            return None
-        data = r.json() or {}
-        shipping = data.get("shipping") or {}
-        sid = shipping.get("id") or shipping.get("shipment_id")
-        return str(sid) if sid else None
+        if r2.status_code == 200:
+            js = r2.json() or {}
+            results = js.get("results") or js.get("shipments") or []
+            if isinstance(results, list) and results:
+                first = results[0]
+                sid = first.get("id") if isinstance(first, dict) else first
+                if sid:
+                    return str(sid)
     except Exception:
-        return None
+        pass
+
+    # 3) /orders/{id}/shipments
+    try:
+        r3 = requests.get(f"{MELI_API_BASE}/orders/{order_id}/shipments", headers=headers, timeout=20)
+        if r3.status_code == 200:
+            js = r3.json() or []
+            if isinstance(js, list) and js:
+                first = js[0]
+                sid = first.get("id") if isinstance(first, dict) else first
+                if sid:
+                    return str(sid)
+    except Exception:
+        pass
+
+    return None
 
 def _meli_download_label_pdf(shipment_id: str, access_token: str) -> Optional[bytes]:
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/pdf"}
@@ -91,13 +129,20 @@ MELI_REFRESH_TOKEN = (st.secrets.get("MELI_REFRESH_TOKEN") or "").strip()
 MELI_ENABLED = all([MELI_CLIENT_ID, MELI_CLIENT_SECRET, MELI_REFRESH_TOKEN])
 
 def _meli_get_access_token() -> Optional[str]:
-    """Renueva y cachea access_token con el refresh guardado en st.secrets."""
+    """Renueva y cachea access_token usando el refresh guardado en Secrets o el último rotado.
+       - Actualiza el refresh_token automáticamente EN MEMORIA.
+       - Evita mostrar el aviso más de una vez por sesión.
+    """
     if not MELI_ENABLED:
         return None
+
     now = int(time.time())
     cache = st.session_state.get("meli_rt_cache") or {}
     if cache.get("access_token") and cache.get("exp", 0) > now + 60:
         return cache["access_token"]
+
+    refresh_to_use = st.session_state.get("meli_refresh_current") or MELI_REFRESH_TOKEN
+
     try:
         r = requests.post(
             f"{MELI_API_BASE}/oauth/token",
@@ -105,20 +150,26 @@ def _meli_get_access_token() -> Optional[str]:
                 "grant_type": "refresh_token",
                 "client_id": MELI_CLIENT_ID,
                 "client_secret": MELI_CLIENT_SECRET,
-                "refresh_token": MELI_REFRESH_TOKEN,
+                "refresh_token": refresh_to_use,
             },
             timeout=20,
         )
         if r.status_code != 200:
             return None
-        j = r.json()
+
+        j = r.json() or {}
         at = j.get("access_token")
         exp = int(j.get("expires_in", 3600))
         st.session_state["meli_rt_cache"] = {"access_token": at, "exp": now + exp}
-        # Aviso si ML rotó el refresh_token (actualízalo en Secrets para persistirlo)
+
+        # Si ML rotó el refresh_token, úsalo desde ahora (en memoria).
         new_rt = j.get("refresh_token")
-        if new_rt and new_rt != MELI_REFRESH_TOKEN:
-            st.info("ℹ️ Mercado Libre emitió un refresh_token nuevo. Actualízalo en Secrets para persistirlo.")
+        if new_rt and new_rt != refresh_to_use:
+            st.session_state["meli_refresh_current"] = new_rt
+            if not st.session_state.get("meli_rt_warned_once"):
+                st.info("Se actualizó el refresh_token automáticamente para esta sesión.")
+                st.session_state["meli_rt_warned_once"] = True
+
         return at
     except Exception:
         return None
@@ -655,7 +706,7 @@ if st.session_state.page == "datos":
                     st.success("✅ Tokens obtenidos.")
                     st.json(tokens)
 
-        # --- Mostrar tokens (si hay) ---
+        # Mostrar tokens (si hay)
         tokens = st.session_state.get("meli_tokens") or {}
         access_token_val = tokens.get("access_token", "")
         refresh_token_val = tokens.get("refresh_token", "")
