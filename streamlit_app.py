@@ -681,37 +681,40 @@ if access_token_val or refresh_token_val:
         use_container_width=True
     )
 
-# --- Prueba rápida de etiqueta (SIEMPRE visible) ---
-st.markdown("---")
-st.write("### Prueba rápida de etiqueta")
-order_id_test = st.text_input("order_id para probar", value="", key="order_id_test_global")
+        # --- Prueba rápida de etiqueta (SIEMPRE visible) ---
+        st.markdown("---")
+        st.write("### Prueba rápida de etiqueta")
+        order_id_test = st.text_input("order_id para probar", value="", key="order_id_test_global")
 
-btn_test = st.button("🔎 Probar descarga PDF",
-                     disabled=not bool(order_id_test.strip()),
-                     key="btn_test_pdf_global")
+        btn_test = st.button(
+            "🔎 Probar descarga PDF",
+            disabled=not bool(order_id_test.strip()),
+            key="btn_test_pdf_global",
+        )
 
-if btn_test:
-    # Usa el access_token visible si lo hay; si no, renueva automáticamente con el refresh en Secrets
-    token_para_usar = access_token_val or _meli_get_access_token()
-    if not token_para_usar:
-        st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
-    else:
-        sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
-        if not sid:
-            st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
-        else:
-pdf = _meli_download_label_pdf(sid, token_para_usar)
-if pdf and pdf[:4] == b"%PDF":
-    st.success(f"PDF OK (shipment_id={sid})")
-    st.download_button(
-        "📄 Descargar etiqueta.pdf",
-        data=pdf,
-        file_name="etiqueta.pdf",
-        mime="application/pdf",
-        use_container_width=True
-    )
-else:
-    st.error("No se pudo descargar la etiqueta.")
+        if btn_test:
+            # Usa access_token visible si existe; si no, renueva con el refresh de Secrets
+            token_para_usar = access_token_val or _meli_get_access_token()
+            if not token_para_usar:
+                st.error("No pude obtener access_token automáticamente. Revisa MELI_* en Secrets.")
+            else:
+                sid = _meli_get_shipment_id_from_order(order_id_test.strip(), token_para_usar)
+                if not sid:
+                    st.error("No se encontró shipment_id (¿es Mercado Envíos y está lista para imprimir?).")
+                else:
+                    pdf = _meli_download_label_pdf(sid, token_para_usar)
+                    if pdf and pdf[:4] == b"%PDF":
+                        st.success(f"PDF OK (shipment_id={sid})")
+                        st.download_button(
+                            "📄 Descargar etiqueta.pdf",
+                            data=pdf,
+                            file_name="etiqueta.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.error("No se pudo descargar la etiqueta.")
+
 
 
 
