@@ -704,7 +704,9 @@ if st.session_state.page == "datos":
             st.write("### Prueba rápida de etiqueta")
             order_id_test = st.text_input("order_id para probar", value="")
 
-            if st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip())):
+# Botón habilitado solo por tener order_id
+btn_test = st.button("🔎 Probar descarga PDF", disabled=not bool(order_id_test.strip()))
+if btn_test:
     # Usa el token visible o renueva automáticamente con el refresh de st.secrets
     token_para_usar = access_token_val or _meli_get_access_token()
     if not token_para_usar:
@@ -726,6 +728,7 @@ if st.session_state.page == "datos":
                 )
             else:
                 st.error("No se pudo descargar la etiqueta.")
+
 
 
             # (Opcional) Descargar tokens como JSON
