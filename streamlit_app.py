@@ -707,8 +707,8 @@ if st.session_state.page == "datos":
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
-            "access_token": access_token,
-            "refresh_token": refresh_token,
+            "access_token": access_token_val,
+            "refresh_token": refresh_token_val,
             "obtained_at": datetime.now(TZ).isoformat(),
         }, ensure_ascii=False, indent=2).encode("utf-8")
 
