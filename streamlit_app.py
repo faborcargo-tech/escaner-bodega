@@ -293,26 +293,21 @@ def process_scan(guia: str):
         archivo_public = match.get("archivo_adjunto") or ""
         asignacion = (match.get("asignacion") or "etiqueta").strip()
 
-        # 1) Mostrar botón de descarga confiable (funciona bien)
-        if archivo_public and url_disponible(archivo_public):
-            try:
-                pdf_bytes = requests.get(archivo_public, timeout=10).content
-                # Validar encabezado PDF
-                if pdf_bytes[:4] == b"%PDF":
-                    st.success(f"🖨️ Etiqueta {asignacion} lista.")
-                    st.download_button(
-                        label=f"📄 Descargar nuevamente {asignacion}.pdf",
-                        data=pdf_bytes,
-                        file_name=f"{asignacion}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
-                else:
-                    st.warning("⚠️ El archivo no parece un PDF válido.")
-            except Exception:
-                st.warning("⚠️ No se pudo descargar el PDF desde Supabase.")
-        else:
-            st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
+        # 1) Intentar con Mercado Libre (auto-refresh) y caer a respaldo
+pdf_bytes = _obtener_pdf_etiqueta(match)  # usa orden_meli + refresh en secrets; si falla, usa archivo_adjunto
+
+if pdf_bytes and pdf_bytes[:4] == b"%PDF":
+    st.success(f"🖨️ Etiqueta {asignacion} lista (prioridad Mercado Libre).")
+    st.download_button(
+        label=f"📄 Imprimir {asignacion}.pdf",
+        data=pdf_bytes,
+        file_name=f"{asignacion}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+else:
+    st.warning("⚠️ No se pudo obtener la etiqueta desde Mercado Libre ni desde el respaldo.")
+
 
         # 2) Insertar un NUEVO registro para el log de impresión (aunque se repita)
         try:
