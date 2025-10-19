@@ -702,7 +702,6 @@ if btn_test:
         else:
             pdf = _meli_download_label_pdf(sid, token_para_usar)
             if pdf and pdf[:4] == b"%PDF":
-
                 st.success(f\"PDF OK (shipment_id={sid})\")
                 st.download_button(
                     \"📄 Descargar etiqueta.pdf\",
