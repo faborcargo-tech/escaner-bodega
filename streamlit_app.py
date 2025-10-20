@@ -305,12 +305,57 @@ def _parse_ts(s: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
-FBC_RE = re.compile(r"\bFBC[0-9A-Z]{3,}\b", re.IGNORECASE)
+def _extract_notes_list(payload: Any) -> List[str]:
+    """
+    Normaliza la respuesta de /orders/{id}/notes:
+    - En tu captura viene como: [ {"results":[{"note":"FBCXXXX", ...}], "order_id": ...} ]
+    - También soporta dict simple o lista simple.
+    Devuelve lista de strings (priorizando 'note'), sin limpiar.
+    """
+    texts: List[str] = []
+
+    def pick_from_result(d: Dict[str, Any]):
+        # Prioridad exacta a 'note' como pediste:
+        if "note" in d and d["note"]:
+            texts.append(str(d["note"]))
+        else:
+            for k in ("text", "plain_text", "description", "message"):
+                if d.get(k):
+                    texts.append(str(d[k]))
+
+    if isinstance(payload, list):
+        for entry in payload:
+            if isinstance(entry, dict):
+                results = entry.get("results")
+                if isinstance(results, list):
+                    for res in results:
+                        if isinstance(res, dict):
+                            pick_from_result(res)
+                else:
+                    pick_from_result(entry)
+            else:
+                # elemento lista no dict
+                if entry:
+                    texts.append(str(entry))
+    elif isinstance(payload, dict):
+        results = payload.get("results")
+        if isinstance(results, list):
+            for res in results:
+                if isinstance(res, dict):
+                    pick_from_result(res)
+        else:
+            pick_from_result(payload)
+
+    return texts
 
 def _get_order_note(order_id: str, token: str) -> str:
-    """Devuelve FBCxxxx de notas o lo detecta en el JSON de la orden."""
+    """
+    Devuelve la asignación EXACTA igual a 'note' (en mayúsculas) si existe en /orders/{id}/notes.
+    Si no hay nota, intenta otras claves y, como último recurso, escanea /orders/{id}.
+    """
     headers = _meli_headers(token)
-    # 1) /notes
+
+    # 1) /orders/{id}/notes
     try:
         r = requests.get(
             f"https://api.mercadolibre.com/orders/{order_id}/notes",
@@ -318,27 +363,14 @@ def _get_order_note(order_id: str, token: str) -> str:
             timeout=15,
         )
         if r.status_code == 200:
-            notes = r.json()
-            texts = []
-            if isinstance(notes, list):
-                for n in notes:
-                    if isinstance(n, dict):
-                        for k in ("note", "text", "plain_text", "description"):
-                            if n.get(k):
-                                texts.append(str(n[k]))
-            elif isinstance(notes, dict):
-                for k in ("note", "text", "plain_text", "description"):
-                    if notes.get(k):
-                        texts.append(str(notes[k]))
-            joined = " | ".join(texts)
-            if joined:
-                m = FBC_RE.search(joined)
-                if m:
-                    return m.group(0).upper()
-                return texts[0].strip().upper() if texts else ""
+            notes = _extract_notes_list(r.json())
+            if notes:
+                # Tomamos la última (más reciente) y la normalizamos a MAYÚSCULAS
+                return notes[-1].strip().upper()
     except Exception:
         pass
-    # 2) Fallback /orders/{id}
+
+    # 2) Fallback /orders/{id} — solo si no hay ninguna nota
     try:
         r2 = requests.get(
             f"https://api.mercadolibre.com/orders/{order_id}",
@@ -347,7 +379,8 @@ def _get_order_note(order_id: str, token: str) -> str:
         )
         if r2.status_code == 200:
             raw = json.dumps(r2.json(), ensure_ascii=False)
-            m = FBC_RE.search(raw)
+            # Si por algún motivo quieres aún reconocer FBC… lo dejamos como emergencia
+            m = re.search(r"\bFBC[0-9A-Z]{3,}\b", raw, re.IGNORECASE)
             if m:
                 return m.group(0).upper()
     except Exception:
@@ -382,7 +415,6 @@ def _get_item_picture(item_id: str, token: str) -> str:
             data = r.json() or {}
             pics = data.get("pictures") or []
             if pics:
-                # usar foto grande si existe
                 return pics[0].get("secure_url") or pics[0].get("url") or data.get("thumbnail") or ""
             return data.get("thumbnail") or ""
     except Exception:
@@ -534,7 +566,7 @@ def sync_meli_orders(days: int = 60):
     st.success(f"✅ Sincronización: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ====== UI DATOS: tabla única, imagen GRANDE, ASIN link, edición limitada ======
+# ====== UI DATOS: imagen GRANDE, ASIN link, edición limitada ======
 
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
@@ -548,14 +580,13 @@ if st.session_state.page == "datos":
     st.markdown("---")
     st.subheader("Tabla de órdenes (DB)")
 
-    # 🔎 Forzar imágenes grandes dentro de la grilla (~400x400)
+    # Miniaturas grandes (~700 px ancho) y filas altas (~260 px)
     st.markdown("""
         <style>
-        [data-testid="stDataFrame"] img { 
-            width: 400px !important; 
-            height: 400px !important; 
-            object-fit: contain; 
-        }
+        [data-testid="stDataEditor"] tbody tr { height: 260px !important; }
+        [data-testid="stDataFrame"]  tbody tr { height: 260px !important; }
+        [data-testid="stDataEditor"] img { width: 700px !important; height: auto !important; object-fit: contain !important; }
+        [data-testid="stDataFrame"]  img { width: 700px !important; height: auto !important; object-fit: contain !important; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -580,7 +611,7 @@ if st.session_state.page == "datos":
 
         df["asin_link"] = df.get("asin", "").apply(asin_to_url)
 
-        # Orden solicitado (imagen→fecha_venta; orden_amazon a la derecha de cantidad)
+        # Orden de columnas (imagen→fecha_venta; orden_amazon a la derecha de cantidad)
         desired_order = [
             "id", "url_imagen", "fecha_venta", "asignacion", "orden_meli", "pack_id",
             "estado_orden", "estado_envio", "asin_link", "cantidad", "orden_amazon",
@@ -600,14 +631,14 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             column_config={
-                "url_imagen": cc.ImageColumn("Imagen (400×400)", help="Miniatura grande"),
+                "url_imagen": cc.ImageColumn("Imagen (grande)", help="Miniatura grande", width=700),
                 "fecha_venta": cc.DatetimeColumn("Fecha venta"),
                 "asignacion": cc.TextColumn("Asignación"),
                 "orden_meli": cc.TextColumn("Orden ML"),
                 "pack_id": cc.TextColumn("Pack ID"),
                 "estado_orden": cc.TextColumn("Estado orden"),
                 "estado_envio": cc.TextColumn("Estado envío"),
-                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon", width=200),
+                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon", width=220),
                 "cantidad": cc.NumberColumn("Cant.", step=1),
                 "orden_amazon": cc.TextColumn("Orden Amazon"),
                 "titulo": cc.TextColumn("Título"),
@@ -666,10 +697,19 @@ def upsert_order_note(order_id: str, note_text: str, token: str) -> Tuple[bool, 
     try:
         r = requests.get(f"https://api.mercadolibre.com/orders/{order_id}/notes", headers=headers, timeout=15)
         if r.status_code == 200:
-            notes = r.json()
-            if isinstance(notes, list) and notes:
-                # usa la última
-                note_id = notes[-1].get("id") or notes[-1].get("note_id")
+            data = r.json()
+            # normalizar como en _extract_notes_list
+            if isinstance(data, list):
+                for entry in data:
+                    results = (entry or {}).get("results") or []
+                    if results:
+                        last = results[-1]
+                        note_id = last.get("id") or last.get("note_id")
+            elif isinstance(data, dict):
+                results = data.get("results") or []
+                if results:
+                    last = results[-1]
+                    note_id = last.get("id") or last.get("note_id")
     except Exception:
         pass
 
@@ -821,4 +861,4 @@ if st.session_state.page == "pruebas":
             if asign:
                 st.success(f"Asignación detectada: **{asign}**")
             else:
-                st.warning("No se encontró FBC en notas/orden.")
+                st.warning("No se encontró nota en la orden.")
