@@ -208,63 +208,64 @@ st.header(
 )
 
 # ==============================
-# ✅ LOGS DE ESCANEO
+# ✅ LOGS DE ESCANEO (solo en INGRESAR/IMPRIMIR)
 # ==============================
-
-def render_log_with_download_buttons(rows: list, page: str):
-    if not rows:
-        st.info("No hay registros aún.")
-        return
-
-    cols = (
-        ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
-        if page == "imprimir"
-        else ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
-    )
-    hc = st.columns([2, 2, 2, 2, 1])
-    for i, h in enumerate(cols):
-        hc[i].markdown(f"**{h}**")
-
-    for r in rows:
-        asign = r.get("asignacion", "")
-        guia = r.get("guia", "")
-        fecha = r.get("fecha_impresion") if page == "imprimir" else r.get("fecha_ingreso")
-        estado = r.get("estado_escaneo", "")
-        url = r.get("archivo_adjunto", "")
-        c = st.columns([2, 2, 2, 2, 1])
-        c[0].write(asign or "-")
-        c[1].write(guia or "-")
-        c[2].write((str(fecha)[:19]) if fecha else "-")
-        c[3].write(estado or "-")
-        if url and url_disponible(url):
-            try:
-                pdf_bytes = requests.get(url, timeout=8).content
-                if pdf_bytes[:4] == b"%PDF":
-                    c[4].download_button(
-                        "⇩",
-                        data=pdf_bytes,
-                        file_name=f"{(asign or 'etiqueta')}.pdf",
-                        mime="application/pdf",
-                        key=f"dl_{asign}_{guia}_{time.time()}",
-                    )
-                else:
-                    c[4].write("No válido")
-            except Exception:
-                c[4].write("No disponible")
-        else:
-            c[4].write("No disponible")
 
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
         process_scan((scan_val or "").strip())
 
-st.subheader("Registro de escaneos (últimos 60 días)")
-rows = get_logs(st.session_state.page)
-render_log_with_download_buttons(rows, st.session_state.page)
+    st.subheader("Registro de escaneos (últimos 60 días)")
+    rows = get_logs(st.session_state.page)
+    # Render solo aquí (no en PRUEBAS ni en DATOS)
+    def render_log_with_download_buttons(rows: list, page: str):
+        if not rows:
+            st.info("No hay registros aún.")
+            return
+
+        cols = (
+            ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
+            if page == "imprimir"
+            else ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
+        )
+        hc = st.columns([2, 2, 2, 2, 1])
+        for i, h in enumerate(cols):
+            hc[i].markdown(f"**{h}**")
+
+        for r in rows:
+            asign = r.get("asignacion", "")
+            guia = r.get("guia", "")
+            fecha = r.get("fecha_impresion") if page == "imprimir" else r.get("fecha_ingreso")
+            estado = r.get("estado_escaneo", "")
+            url = r.get("archivo_adjunto", "")
+            c = st.columns([2, 2, 2, 2, 1])
+            c[0].write(asign or "-")
+            c[1].write(guia or "-")
+            c[2].write((str(fecha)[:19]) if fecha else "-")
+            c[3].write(estado or "-")
+            if url and url_disponible(url):
+                try:
+                    pdf_bytes = requests.get(url, timeout=8).content
+                    if pdf_bytes[:4] == b"%PDF":
+                        c[4].download_button(
+                            "⇩",
+                            data=pdf_bytes,
+                            file_name=f"{(asign or 'etiqueta')}.pdf",
+                            mime="application/pdf",
+                            key=f"dl_{asign}_{guia}_{time.time()}",
+                        )
+                    else:
+                        c[4].write("No válido")
+                except Exception:
+                    c[4].write("No disponible")
+            else:
+                c[4].write("No disponible")
+
+    render_log_with_download_buttons(rows, st.session_state.page)
 
 # =========================================================
-# 🔄 SINCRONIZAR VENTAS – pestaña DATOS
+# 🔄 SINCRONIZAR VENTAS – pestaña DATOS (tabla única)
 # =========================================================
 
 def _meli_headers(token: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -331,7 +332,6 @@ def _meli_get_item_picture(item_id: str, token: str) -> str:
             pics = data.get("pictures") or []
             if pics:
                 return pics[0].get("secure_url") or pics[0].get("url") or ""
-            # Fallback
             return data.get("thumbnail") or ""
     except Exception:
         pass
@@ -347,7 +347,6 @@ def _map_order_to_row(order: Dict[str, Any], token: str) -> Dict[str, Any]:
     first = items[0] if items else {}
     item_info = first.get("item") or {}
 
-    # seller_sku puede venir en item.seller_sku o seller_custom_field dependiendo del flujo
     asin = item_info.get("seller_sku") or item_info.get("seller_custom_field") or ""
     cantidad = first.get("quantity") or 0
     titulo = item_info.get("title") or ""
@@ -358,10 +357,9 @@ def _map_order_to_row(order: Dict[str, Any], token: str) -> Dict[str, Any]:
     asignacion = _meli_get_order_notes(order_id, token)
     url_imagen = _meli_get_item_picture(item_info.get("id") or "", token)
 
-    # Campos que deben quedar vacíos para edición manual o impresión posterior
     return {
-        "asignacion": asignacion,         # de notas (FBCXXXX)
-        "guia": "",                       # manual
+        "asignacion": asignacion,   # FBCXXXX (nota)
+        "guia": "",                 # manual
         "estado_orden": status,
         "estado_envio": estado_envio,
         "asin": asin,
@@ -370,12 +368,19 @@ def _map_order_to_row(order: Dict[str, Any], token: str) -> Dict[str, Any]:
         "orden_meli": order_id,
         "pack_id": pack_id,
         "url_imagen": url_imagen,
-        "archivo_adjunto": "",            # manual o por impresión
-        # comentario / descripcion / fechas se mantienen por otros flujos
+        "archivo_adjunto": "",      # manual o por impresión
     }
 
+def _get_existing_ids_by_order(order_id: str) -> List[int]:
+    """Devuelve todos los IDs existentes para un orden_meli (para detectar duplicados previos)."""
+    try:
+        rows = supabase.table(TABLE_NAME).select("id").eq("orden_meli", order_id).execute().data or []
+        return [r["id"] for r in rows if "id" in r]
+    except Exception:
+        return []
+
 def sync_meli_orders(days: int = 60):
-    """Sincroniza órdenes de los últimos `days` días. Inserta nuevas y actualiza cambios."""
+    """Sincroniza órdenes de los últimos `days` días. Evita duplicados por `orden_meli`."""
     token = (st.session_state.get("meli_manual_token") or "").strip()
     if not token:
         st.error("❌ No hay Access Token guardado. Ve a la pestaña PRUEBAS y guarda el token.")
@@ -426,9 +431,9 @@ def sync_meli_orders(days: int = 60):
             order_id = row["orden_meli"]
 
             try:
-                existing = supabase.table(TABLE_NAME).select("id").eq("orden_meli", order_id).execute().data
-                if existing:
-                    # Solo actualizamos campos de sincronización; no tocamos guía, comentario, descripción, fechas
+                existing_ids = _get_existing_ids_by_order(order_id)
+                if existing_ids:
+                    # Actualizamos el primero que exista (evitamos insertar duplicados)
                     supabase.table(TABLE_NAME).update({
                         "asignacion": row["asignacion"],
                         "estado_orden": row["estado_orden"],
@@ -438,7 +443,7 @@ def sync_meli_orders(days: int = 60):
                         "titulo": row["titulo"],
                         "pack_id": row["pack_id"],
                         "url_imagen": row["url_imagen"],
-                    }).eq("orden_meli", order_id).execute()
+                    }).eq("id", existing_ids[0]).execute()
                     updated += 1
                 else:
                     supabase.table(TABLE_NAME).insert(row).execute()
@@ -455,7 +460,7 @@ def sync_meli_orders(days: int = 60):
     st.success(f"✅ Sincronización completa: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Bloque UI para pestaña DATOS
+# Bloque UI para pestaña DATOS (tabla única)
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
     colA, colB, colC = st.columns([2, 2, 6])
@@ -466,9 +471,9 @@ if st.session_state.page == "datos":
         st.caption(f"Última sincronización: {st.session_state.get('last_sync', '—')}")
 
     st.markdown("---")
-    st.subheader("Tabla de órdenes")
+    st.subheader("Tabla de órdenes (últimos 60 días en DB)")
     try:
-        # Mostrar todo lo que hay en la base (descendente por id para ver lo nuevo arriba)
+        # Mostrar lo que haya en la base (descendente por id para ver lo nuevo arriba)
         data = (
             supabase.table(TABLE_NAME)
             .select("*")
@@ -483,7 +488,7 @@ if st.session_state.page == "datos":
         st.error(f"No se pudo cargar la tabla: {e}")
 
 # =========================================================
-# 🔧 PRUEBAS — Token manual + impresión de guía PDF
+# 🔧 PRUEBAS — Token manual + impresión de guía PDF (sin tabla)
 # =========================================================
 
 if st.session_state.page == "pruebas":
@@ -522,7 +527,7 @@ if st.session_state.page == "pruebas":
             headers = {"Authorization": f"Bearer {token}"}
             shipment = (shipment_id or "").strip()
 
-            # Si no se ingresó shipment, intentar derivar desde order/pack
+            # Derivar shipment si hace falta
             if not shipment and order_id:
                 r = requests.get(
                     f"https://api.mercadolibre.com/orders/{order_id}",
