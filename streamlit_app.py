@@ -3,11 +3,12 @@
 import io
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import pandas as pd
 import pytz
 import requests
 import streamlit as st
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import Client, create_client
 
 # ==============================
@@ -23,6 +24,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 TABLE_NAME = "paquetes_mercadoenvios_chile"
 STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
+
+MANUAL_FIELDS = ["guia", "archivo_adjunto", "comentario", "descripcion", "orden_amazon"]
 
 # ==============================
 # ✅ HELPERS STORAGE / DB
@@ -95,6 +98,9 @@ def insert_no_coincidente(guia: str):
             "titulo": "",
             "orden_meli": "",
             "pack_id": "",
+            "fecha_venta": None,
+            "fecha_sincronizacion": None,
+            "orden_amazon": "",
         }
     ).execute()
 
@@ -218,7 +224,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
 
     st.subheader("Registro de escaneos (últimos 60 días)")
     rows = get_logs(st.session_state.page)
-    # Render solo aquí (no en PRUEBAS ni en DATOS)
+
     def render_log_with_download_buttons(rows: list, page: str):
         if not rows:
             st.info("No hay registros aún.")
@@ -265,7 +271,7 @@ if st.session_state.page in ("ingresar", "imprimir"):
     render_log_with_download_buttons(rows, st.session_state.page)
 
 # =========================================================
-# 🔄 SINCRONIZAR VENTAS – pestaña DATOS (tabla única)
+# 🔄 SINCRONIZAR VENTAS – pestaña DATOS (única tabla)
 # =========================================================
 
 def _meli_headers(token: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -287,30 +293,56 @@ def _meli_get_seller_id(token: str) -> Optional[int]:
         pass
     return None
 
-def _meli_get_order_notes(order_id: str, token: str) -> str:
-    """Devuelve la primera nota (asignación FBCXXXX) si existe."""
+def _parse_ts(s: Optional[str]) -> Optional[str]:
+    """Convierte fecha de Meli a ISO local (Santiago) para guardar como timestamp."""
+    if not s:
+        return None
+    try:
+        # Meli formato: 2025-10-05T13:45:10.000-04:00
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.astimezone(TZ).replace(tzinfo=None).isoformat()
+    except Exception:
+        return None
+
+def _get_order_note(order_id: str, token: str) -> str:
+    # Nota de la orden (FBCXXXX)
     try:
         r = requests.get(
             f"https://api.mercadolibre.com/orders/{order_id}/notes",
             headers=_meli_headers(token),
-            timeout=20,
+            timeout=15,
         )
         if r.status_code == 200:
             notes = r.json()
             if isinstance(notes, list) and notes:
-                return (notes[0].get("note") or "").strip()
+                note = (notes[0].get("note") or "").strip()
+                return note
+    except Exception:
+        pass
+    # fallback (si existiese)
+    try:
+        r2 = requests.get(
+            f"https://api.mercadolibre.com/orders/{order_id}",
+            headers=_meli_headers(token),
+            timeout=15,
+        )
+        if r2.status_code == 200:
+            data = r2.json() or {}
+            # algunos sellers dejan comentario en address.comment
+            comment = (((data.get("shipping") or {}).get("receiver_address") or {}).get("comment") or "").strip()
+            return comment
     except Exception:
         pass
     return ""
 
-def _meli_get_envio_status(shipment_id: Any, token: str) -> str:
+def _get_ship_status(shipment_id: Any, token: str) -> str:
     if not shipment_id:
         return ""
     try:
         r = requests.get(
             f"https://api.mercadolibre.com/shipments/{shipment_id}",
             headers=_meli_headers(token, {"x-format-new": "true"}),
-            timeout=20,
+            timeout=15,
         )
         if r.status_code == 200:
             return (r.json() or {}).get("status", "")
@@ -318,69 +350,45 @@ def _meli_get_envio_status(shipment_id: Any, token: str) -> str:
         pass
     return ""
 
-def _meli_get_item_picture(item_id: str, token: str) -> str:
+def _get_item_picture(item_id: str, token: str) -> str:
     if not item_id:
         return ""
     try:
         r = requests.get(
             f"https://api.mercadolibre.com/items/{item_id}",
             headers=_meli_headers(token),
-            timeout=20,
+            timeout=15,
         )
         if r.status_code == 200:
             data = r.json() or {}
             pics = data.get("pictures") or []
             if pics:
-                return pics[0].get("secure_url") or pics[0].get("url") or ""
+                return pics[0].get("secure_url") or pics[0].get("url") or data.get("thumbnail") or ""
             return data.get("thumbnail") or ""
     except Exception:
         pass
     return ""
 
-def _map_order_to_row(order: Dict[str, Any], token: str) -> Dict[str, Any]:
-    """Mapea una orden de Meli a la fila de Supabase según tu requerimiento."""
-    order_id = str(order.get("id", ""))
-    pack_id = str(order.get("pack_id") or (order.get("pack") or {}).get("id") or "")
+def _map_order(order: Dict[str, Any]) -> Tuple[str, str, str, int, str, str, str, str, str]:
+    """Extrae datos básicos del payload de /orders/search (sin llamadas extra)."""
+    oid = str(order.get("id", ""))
     status = order.get("status", "")
-
-    items = order.get("order_items") or []
-    first = items[0] if items else {}
-    item_info = first.get("item") or {}
-
+    created = _parse_ts(order.get("date_created"))
+    order_items = order.get("order_items") or []
+    item = order_items[0] if order_items else {}
+    item_info = item.get("item") or {}
     asin = item_info.get("seller_sku") or item_info.get("seller_custom_field") or ""
-    cantidad = first.get("quantity") or 0
-    titulo = item_info.get("title") or ""
-
-    shipping_id = (order.get("shipping") or {}).get("id")
-    estado_envio = _meli_get_envio_status(shipping_id, token)
-
-    asignacion = _meli_get_order_notes(order_id, token)
-    url_imagen = _meli_get_item_picture(item_info.get("id") or "", token)
-
-    return {
-        "asignacion": asignacion,   # FBCXXXX (nota)
-        "guia": "",                 # manual
-        "estado_orden": status,
-        "estado_envio": estado_envio,
-        "asin": asin,
-        "cantidad": cantidad,
-        "titulo": titulo,
-        "orden_meli": order_id,
-        "pack_id": pack_id,
-        "url_imagen": url_imagen,
-        "archivo_adjunto": "",      # manual o por impresión
-    }
-
-def _get_existing_ids_by_order(order_id: str) -> List[int]:
-    """Devuelve todos los IDs existentes para un orden_meli (para detectar duplicados previos)."""
-    try:
-        rows = supabase.table(TABLE_NAME).select("id").eq("orden_meli", order_id).execute().data or []
-        return [r["id"] for r in rows if "id" in r]
-    except Exception:
-        return []
+    qty = int(item.get("quantity") or 0)
+    title = item_info.get("title") or ""
+    item_id = item_info.get("id") or ""
+    pack_id = str(order.get("pack_id") or (order.get("pack") or {}).get("id") or "") or oid
+    shipment_id = (order.get("shipping") or {}).get("id")
+    return oid, status, created, qty, asin, title, item_id, pack_id, shipment_id
 
 def sync_meli_orders(days: int = 60):
-    """Sincroniza órdenes de los últimos `days` días. Evita duplicados por `orden_meli`."""
+    """Sincroniza órdenes de los últimos `days` días. Evita duplicados por `orden_meli` y
+    no toca campos manuales (guia, archivo_adjunto, comentario, descripcion, orden_amazon).
+    """
     token = (st.session_state.get("meli_manual_token") or "").strip()
     if not token:
         st.error("❌ No hay Access Token guardado. Ve a la pestaña PRUEBAS y guarda el token.")
@@ -426,30 +434,82 @@ def sync_meli_orders(days: int = 60):
         if not orders:
             break
 
-        for order in orders:
-            row = _map_order_to_row(order, token)
-            order_id = row["orden_meli"]
+        # Pre-procesar mínimo sin llamadas extra
+        basics = [_map_order(o) for o in orders]
+
+        # Concurrencia: para notas, estados de envío e imagen
+        with ThreadPoolExecutor(max_workers=12) as exe:
+            futures = {}
+            for (oid, _, _, _, _, _, item_id, _, shipment_id) in basics:
+                futures[exe.submit(_get_order_note, oid, token)] = ("note", oid)
+                futures[exe.submit(_get_item_picture, item_id, token)] = ("pic", oid)
+                if shipment_id:
+                    futures[exe.submit(_get_ship_status, shipment_id, token)] = ("ship", oid)
+
+            notes: Dict[str, str] = {}
+            pics: Dict[str, str] = {}
+            ships: Dict[str, str] = {}
+            for fut in as_completed(futures):
+                kind, oid = futures[fut]
+                try:
+                    val = fut.result()
+                except Exception:
+                    val = ""
+                if kind == "note":
+                    notes[oid] = val
+                elif kind == "pic":
+                    pics[oid] = val
+                elif kind == "ship":
+                    ships[oid] = val
+
+        now_sync_iso = datetime.now(TZ).replace(tzinfo=None).isoformat()
+
+        for (oid, status, created, qty, asin, title, _item_id, pack_id, _shipment_id) in basics:
+            asignacion = (notes.get(oid) or "").strip()
+            url_imagen = pics.get(oid, "")
+            estado_envio = ships.get(oid, "")
+
+            # si no trae pack_id, usar orden_meli
+            pack_final = pack_id or oid
+
+            row_sync = {
+                "asignacion": asignacion,
+                "guia": "",  # manual
+                "estado_orden": status,
+                "estado_envio": estado_envio,
+                "asin": asin,
+                "cantidad": qty,
+                "titulo": title,
+                "orden_meli": oid,
+                "pack_id": pack_final,
+                "url_imagen": url_imagen,
+                "archivo_adjunto": "",  # manual o por impresión
+                "fecha_venta": created,
+                "fecha_sincronizacion": now_sync_iso,
+            }
 
             try:
-                existing_ids = _get_existing_ids_by_order(order_id)
-                if existing_ids:
-                    # Actualizamos el primero que exista (evitamos insertar duplicados)
+                # Comprobar duplicados por orden_meli
+                existing = supabase.table(TABLE_NAME).select("id").eq("orden_meli", oid).execute().data or []
+                if existing:
                     supabase.table(TABLE_NAME).update({
-                        "asignacion": row["asignacion"],
-                        "estado_orden": row["estado_orden"],
-                        "estado_envio": row["estado_envio"],
-                        "asin": row["asin"],
-                        "cantidad": row["cantidad"],
-                        "titulo": row["titulo"],
-                        "pack_id": row["pack_id"],
-                        "url_imagen": row["url_imagen"],
-                    }).eq("id", existing_ids[0]).execute()
+                        "asignacion": row_sync["asignacion"],
+                        "estado_orden": row_sync["estado_orden"],
+                        "estado_envio": row_sync["estado_envio"],
+                        "asin": row_sync["asin"],
+                        "cantidad": row_sync["cantidad"],
+                        "titulo": row_sync["titulo"],
+                        "pack_id": row_sync["pack_id"],
+                        "url_imagen": row_sync["url_imagen"],
+                        "fecha_venta": row_sync["fecha_venta"],
+                        "fecha_sincronizacion": row_sync["fecha_sincronizacion"],
+                    }).eq("id", existing[0]["id"]).execute()
                     updated += 1
                 else:
-                    supabase.table(TABLE_NAME).insert(row).execute()
+                    supabase.table(TABLE_NAME).insert(row_sync).execute()
                     inserted += 1
             except Exception as e:
-                st.warning(f"⚠️ Error guardando orden {order_id}: {e}")
+                st.warning(f"⚠️ Error guardando orden {oid}: {e}")
 
         paging = payload.get("paging") or {}
         total = paging.get("total") or 0
@@ -457,33 +517,120 @@ def sync_meli_orders(days: int = 60):
         if offset >= total:
             break
 
-    st.success(f"✅ Sincronización completa: {inserted} nuevas · {updated} actualizadas.")
+    st.success(f"✅ Sincronización: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Bloque UI para pestaña DATOS (tabla única)
+# Bloque UI para pestaña DATOS (única tabla + edición + borrar/resincronizar)
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
+
     colA, colB, colC = st.columns([2, 2, 6])
     with colA:
         if st.button("🔄 Sincronizar ventas (últimos 60 días)", use_container_width=True):
             sync_meli_orders(days=60)
     with colB:
+        if st.button("🗑️ Vaciar y resincronizar 60 días", use_container_width=True):
+            try:
+                supabase.table(TABLE_NAME).delete().neq("id", -1).execute()
+                st.warning("Tabla vaciada. Iniciando resincronización…")
+                sync_meli_orders(days=60)
+            except Exception as e:
+                st.error(f"No se pudo vaciar la tabla: {e}")
+    with colC:
         st.caption(f"Última sincronización: {st.session_state.get('last_sync', '—')}")
 
     st.markdown("---")
-    st.subheader("Tabla de órdenes (últimos 60 días en DB)")
+    st.subheader("Tabla de órdenes (DB)")
+
     try:
-        # Mostrar lo que haya en la base (descendente por id para ver lo nuevo arriba)
+        # Traer todo y ordenar por fecha_venta desc (más recientes arriba)
         data = (
             supabase.table(TABLE_NAME)
             .select("*")
-            .order("id", desc=True)
+            .order("fecha_venta", desc=True)
+            .order("id", desc=True)  # fallback
             .execute()
             .data
             or []
         )
         df = pd.DataFrame(data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Columna imagen (usando la URL)
+        # Para mostrar 100x100 en data_editor, usamos ImageColumn
+        from streamlit import column_config as cc
+
+        # Orden de columnas solicitado
+        desired_order = [
+            "id", "url_imagen", "asignacion", "orden_meli", "pack_id",
+            "estado_orden", "estado_envio", "asin", "cantidad", "titulo",
+            "guia", "archivo_adjunto", "comentario", "descripcion",
+            "orden_amazon", "fecha_venta", "fecha_sincronizacion",
+            "fecha_ingreso", "fecha_impresion",
+        ]
+        # Asegurar columnas faltantes en el DF
+        for col in desired_order:
+            if col not in df.columns:
+                df[col] = None
+
+        df = df[desired_order]
+
+        st.caption("👉 Haz clic en una celda editable, cambia y luego pulsa **Guardar cambios**.")
+        edited = st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "url_imagen": cc.ImageColumn("Imagen", help="Vista 100x100", width=100),
+                "asignacion": cc.TextColumn("Asignación"),
+                "orden_meli": cc.TextColumn("Orden ML"),
+                "pack_id": cc.TextColumn("Pack ID"),
+                "estado_orden": cc.TextColumn("Estado orden"),
+                "estado_envio": cc.TextColumn("Estado envío"),
+                "asin": cc.TextColumn("ASIN / SKU"),
+                "cantidad": cc.NumberColumn("Cant.", step=1),
+                "titulo": cc.TextColumn("Título"),
+                "guia": cc.TextColumn("Guía (manual)"),
+                "archivo_adjunto": cc.TextColumn("Archivo adjunto (URL PDF)"),
+                "comentario": cc.TextColumn("Comentario"),
+                "descripcion": cc.TextColumn("Descripción"),
+                "orden_amazon": cc.TextColumn("Orden Amazon"),
+                "fecha_venta": cc.DatetimeColumn("Fecha venta"),
+                "fecha_sincronizacion": cc.DatetimeColumn("Fecha sincronización"),
+                "fecha_ingreso": cc.DatetimeColumn("Fecha ingreso"),
+                "fecha_impresion": cc.DatetimeColumn("Fecha impresión"),
+            },
+            disabled=[
+                "id", "url_imagen", "asignacion", "orden_meli", "pack_id",
+                "estado_orden", "estado_envio", "asin", "cantidad", "titulo",
+                "fecha_venta", "fecha_sincronizacion", "fecha_ingreso", "fecha_impresion",
+            ],  # solo manual_fields se editan
+            key="datos_table_editor",
+        )
+
+        if st.button("💾 Guardar cambios (campos manuales)", use_container_width=True):
+            try:
+                # Detectar cambios en campos manuales y actualizar por id
+                original = df.set_index("id")
+                changed = edited.set_index("id")
+                to_update = []
+                for idx in changed.index:
+                    row_o = original.loc[idx]
+                    row_n = changed.loc[idx]
+                    updates = {}
+                    for f in MANUAL_FIELDS:
+                        if str(row_o.get(f)) != str(row_n.get(f)):
+                            updates[f] = (row_n.get(f) or "").strip() if isinstance(row_n.get(f), str) else row_n.get(f)
+                    if updates:
+                        to_update.append((idx, updates))
+                if not to_update:
+                    st.info("No hay cambios para guardar.")
+                else:
+                    for (row_id, payload) in to_update:
+                        supabase.table(TABLE_NAME).update(payload).eq("id", row_id).execute()
+                    st.success(f"✅ Guardado: {len(to_update)} filas actualizadas.")
+            except Exception as e:
+                st.error(f"No se pudo guardar: {e}")
+
     except Exception as e:
         st.error(f"No se pudo cargar la tabla: {e}")
 
