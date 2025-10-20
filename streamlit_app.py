@@ -382,6 +382,7 @@ def _get_item_picture(item_id: str, token: str) -> str:
             data = r.json() or {}
             pics = data.get("pictures") or []
             if pics:
+                # usar foto grande si existe
                 return pics[0].get("secure_url") or pics[0].get("url") or data.get("thumbnail") or ""
             return data.get("thumbnail") or ""
     except Exception:
@@ -533,7 +534,7 @@ def sync_meli_orders(days: int = 60):
     st.success(f"✅ Sincronización: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ====== UI DATOS: tabla única, imagen 400x400, ASIN link y edición limitada ======
+# ====== UI DATOS: tabla única, imagen GRANDE, ASIN link, edición limitada ======
 
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
@@ -547,6 +548,17 @@ if st.session_state.page == "datos":
     st.markdown("---")
     st.subheader("Tabla de órdenes (DB)")
 
+    # 🔎 Forzar imágenes grandes dentro de la grilla (~400x400)
+    st.markdown("""
+        <style>
+        [data-testid="stDataFrame"] img { 
+            width: 400px !important; 
+            height: 400px !important; 
+            object-fit: contain; 
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     try:
         data = (
             supabase.table(TABLE_NAME)
@@ -559,8 +571,7 @@ if st.session_state.page == "datos":
         )
         df = pd.DataFrame(data)
 
-        # Columnas auxiliares
-        # ASIN clickeable -> LinkColumn; mantenemos asin original fuera de la vista
+        # ASIN clickeable -> Amazon
         def asin_to_url(x: Optional[str]) -> Optional[str]:
             x = (x or "").strip()
             if not x:
@@ -569,7 +580,7 @@ if st.session_state.page == "datos":
 
         df["asin_link"] = df.get("asin", "").apply(asin_to_url)
 
-        # Orden solicitado:
+        # Orden solicitado (imagen→fecha_venta; orden_amazon a la derecha de cantidad)
         desired_order = [
             "id", "url_imagen", "fecha_venta", "asignacion", "orden_meli", "pack_id",
             "estado_orden", "estado_envio", "asin_link", "cantidad", "orden_amazon",
@@ -589,14 +600,14 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             column_config={
-                "url_imagen": cc.ImageColumn("Imagen", help="Vista 400x400", width=400),
+                "url_imagen": cc.ImageColumn("Imagen (400×400)", help="Miniatura grande"),
                 "fecha_venta": cc.DatetimeColumn("Fecha venta"),
                 "asignacion": cc.TextColumn("Asignación"),
                 "orden_meli": cc.TextColumn("Orden ML"),
                 "pack_id": cc.TextColumn("Pack ID"),
                 "estado_orden": cc.TextColumn("Estado orden"),
                 "estado_envio": cc.TextColumn("Estado envío"),
-                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon", width=160),
+                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon", width=200),
                 "cantidad": cc.NumberColumn("Cant.", step=1),
                 "orden_amazon": cc.TextColumn("Orden Amazon"),
                 "titulo": cc.TextColumn("Título"),
@@ -608,7 +619,7 @@ if st.session_state.page == "datos":
                 "fecha_ingreso": cc.DatetimeColumn("Fecha ingreso"),
                 "fecha_impresion": cc.DatetimeColumn("Fecha impresión"),
             },
-            # Deshabilitar TODO excepto los 4 manuales permitidos
+            # 🔒 Deshabilitar TODO excepto los 4 manuales
             disabled=[c for c in df.columns if c not in MANUAL_FIELDS],
             key="datos_table_editor",
         )
@@ -644,8 +655,44 @@ if st.session_state.page == "datos":
         st.error(f"No se pudo cargar la tabla: {e}")
 
 # =========================================================
-# 🔧 PRUEBAS — Token manual + prueba de etiqueta
+# 🔧 PRUEBAS — Token manual + prueba de etiqueta + notas de ML
 # =========================================================
+
+def upsert_order_note(order_id: str, note_text: str, token: str) -> Tuple[bool, str]:
+    """Crea o actualiza la nota de la orden. Si existe, intenta PUT al último note_id; si no, hace POST."""
+    headers = _meli_headers(token, {"Content-Type": "application/json"})
+    # leer notas existentes
+    note_id = None
+    try:
+        r = requests.get(f"https://api.mercadolibre.com/orders/{order_id}/notes", headers=headers, timeout=15)
+        if r.status_code == 200:
+            notes = r.json()
+            if isinstance(notes, list) and notes:
+                # usa la última
+                note_id = notes[-1].get("id") or notes[-1].get("note_id")
+    except Exception:
+        pass
+
+    try:
+        payload = {"note": note_text}
+        if note_id:
+            r = requests.put(
+                f"https://api.mercadolibre.com/orders/{order_id}/notes/{note_id}",
+                headers=headers, json=payload, timeout=20
+            )
+            if r.status_code in (200, 201):
+                return True, "Nota actualizada correctamente."
+            return False, f"PUT {r.status_code}: {r.text[:200]}"
+        else:
+            r = requests.post(
+                f"https://api.mercadolibre.com/orders/{order_id}/notes",
+                headers=headers, json=payload, timeout=20
+            )
+            if r.status_code in (200, 201):
+                return True, "Nota creada correctamente."
+            return False, f"POST {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return False, f"Error de red: {e}"
 
 if st.session_state.page == "pruebas":
     st.subheader("Access Token manual")
@@ -719,3 +766,59 @@ if st.session_state.page == "pruebas":
                     )
                 else:
                     st.error(f"Error {r.status_code}: {r.text[:300]}")
+
+    st.markdown("---")
+    st.subheader("📝 Prueba de notas de orden (Asignación FBCXXXX)")
+
+    coln1, coln2 = st.columns([2, 3])
+    with coln1:
+        order_id_notes = st.text_input("Order ID (para notas)")
+    with coln2:
+        asign_test = st.text_input("Asignación a guardar (FBCXXXX)", placeholder="FBC7759")
+
+    cols_btn = st.columns(3)
+    if cols_btn[0].button("👁️ Ver notas", use_container_width=True):
+        token = (st.session_state.get("meli_manual_token") or "").strip()
+        if not token:
+            st.error("Falta token.")
+        elif not order_id_notes:
+            st.error("Falta Order ID.")
+        else:
+            r = requests.get(
+                f"https://api.mercadolibre.com/orders/{order_id_notes}/notes",
+                headers=_meli_headers(token),
+                timeout=20
+            )
+            if r.status_code == 200:
+                st.success("Notas actuales:")
+                st.json(r.json())
+            else:
+                st.error(f"Error {r.status_code}: {r.text[:200]}")
+
+    if cols_btn[1].button("💾 Crear/Actualizar nota", use_container_width=True):
+        token = (st.session_state.get("meli_manual_token") or "").strip()
+        if not token:
+            st.error("Falta token.")
+        elif not order_id_notes:
+            st.error("Falta Order ID.")
+        elif not asign_test:
+            st.error("Falta texto de asignación.")
+        else:
+            ok, msg = upsert_order_note(order_id_notes, asign_test, token)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+
+    if cols_btn[2].button("🔄 Probar extracción de asignación", use_container_width=True):
+        token = (st.session_state.get("meli_manual_token") or "").strip()
+        if not token:
+            st.error("Falta token.")
+        elif not order_id_notes:
+            st.error("Falta Order ID.")
+        else:
+            asign = _get_order_note(order_id_notes, token)
+            if asign:
+                st.success(f"Asignación detectada: **{asign}**")
+            else:
+                st.warning("No se encontró FBC en notas/orden.")
