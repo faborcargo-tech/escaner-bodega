@@ -1,16 +1,8 @@
 # streamlit_app.py
 
-# ------------------------------------------------------------
-# Escáner Bodega — App original + pestaña PRUEBAS (OAuth/labels)
-# Fix: nunca usar secrets para refrescar; solo el refresh_token
-# de sesión obtenido vía OAuth. Botón de reconexión a PRUEBAS.
-# ------------------------------------------------------------
-
 import io
 import time
 from datetime import datetime, timedelta
-from urllib.parse import quote_plus
-
 import pandas as pd
 import pytz
 import requests
@@ -18,7 +10,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==============================
-# ✅ CONFIGURACIÓN GENERAL
+# ✅ CONFIG GENERAL
 # ==============================
 
 st.set_page_config(page_title="Escáner Bodega", layout="wide")
@@ -32,10 +24,10 @@ STORAGE_BUCKET = "etiquetas"
 TZ = pytz.timezone("America/Santiago")
 
 # ==============================
-# ✅ STORAGE HELPERS
+# ✅ HELPERS STORAGE / DB
 # ==============================
 
-def _get_public_or_signed_url(path: str) -> str | None:
+def _get_public_url(path: str) -> str | None:
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
         if isinstance(url, dict):
@@ -45,7 +37,6 @@ def _get_public_or_signed_url(path: str) -> str | None:
         return None
 
 def upload_pdf_to_storage(asignacion: str, file_like) -> str | None:
-    """Sube/reemplaza PDF como etiquetas/<asignacion>.pdf y retorna su URL pública."""
     if not asignacion or file_like is None:
         return None
     key_path = f"{asignacion}.pdf"
@@ -57,24 +48,7 @@ def upload_pdf_to_storage(asignacion: str, file_like) -> str | None:
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
         return None
-
-    # Forzar MIME application/pdf
-    try:
-        headers = {
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY,
-            "Content-Type": "application/json",
-        }
-        requests.patch(
-            f"{SUPABASE_URL}/storage/v1/object/info/{STORAGE_BUCKET}/{key_path}",
-            headers=headers,
-            json={"contentType": "application/pdf"},
-            timeout=5,
-        )
-    except Exception:
-        pass
-
-    return _get_public_or_signed_url(key_path)
+    return _get_public_url(key_path)
 
 def url_disponible(url: str) -> bool:
     if not url:
@@ -84,10 +58,6 @@ def url_disponible(url: str) -> bool:
         return r.status_code == 200
     except Exception:
         return False
-
-# ==============================
-# ✅ DB HELPERS
-# ==============================
 
 def lookup_by_guia(guia: str):
     res = supabase.table(TABLE_NAME).select("*").eq("guia", guia).execute()
@@ -185,48 +155,21 @@ def process_scan(guia: str):
                     "guia": guia,
                     "fecha_impresion": now,
                     "estado_escaneo": "IMPRIMIDO CORRECTAMENTE!",
-                    "estado_orden": match.get("estado_orden"),
-                    "estado_envio": match.get("estado_envio"),
                     "archivo_adjunto": archivo_public,
-                    "comentario": match.get("comentario"),
-                    "titulo": match.get("titulo"),
-                    "asin": match.get("asin"),
-                    "cantidad": match.get("cantidad"),
-                    "orden_meli": match.get("orden_meli"),
-                    "pack_id": match.get("pack_id"),
                 }
             ).execute()
         except Exception:
             pass
 
 # ==============================
-# ✅ PERSISTENCIA DE SECCIÓN
+# ✅ PERSISTENCIA / NAV
 # ==============================
 
-def _get_page_param_default() -> str:
-    try:
-        qp = st.query_params
-        return qp.get("page", ["ingresar"])[0]
-    except Exception:
-        qp = st.experimental_get_query_params()
-        return qp.get("page", ["ingresar"])[0]
-
-def _set_page_param(p: str):
-    try:
-        st.query_params["page"] = p
-    except Exception:
-        st.experimental_set_query_params(page=p)
-
 if "page" not in st.session_state:
-    st.session_state.page = _get_page_param_default()
+    st.session_state.page = "ingresar"
 
 def set_page(p: str):
     st.session_state.page = p
-    _set_page_param(p)
-
-# ==============================
-# ✅ NAV
-# ==============================
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -261,7 +204,7 @@ st.header(
 )
 
 # ==============================
-# ✅ LOG DE ESCANEOS
+# ✅ LOGS DE ESCANEO
 # ==============================
 
 def render_log_with_download_buttons(rows: list, page: str):
@@ -305,10 +248,6 @@ def render_log_with_download_buttons(rows: list, page: str):
         else:
             c[4].write("No disponible")
 
-# ==============================
-# SECCIONES INGRESAR / IMPRIMIR
-# ==============================
-
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
@@ -318,10 +257,66 @@ if st.session_state.page in ("ingresar", "imprimir"):
     rows = get_logs(st.session_state.page)
     render_log_with_download_buttons(rows, st.session_state.page)
 
-# ==============================
-# CRUD — PÁGINA DATOS
-# ==============================
+# =========================================================
+# 🔧 PRUEBAS — Token manual + impresión de guía PDF
+# =========================================================
 
-# (La sección CRUD continúa sin modificaciones)
-# ...
-# (idéntico al archivo que me enviaste)
+if st.session_state.page == "pruebas":
+    st.subheader("Probar descarga de etiqueta con token manual")
+
+    access_token = st.text_area(
+        "Access Token (pégalo aquí, generado desde Postman)",
+        value=st.session_state.get("meli_manual_token", ""),
+        height=100,
+    )
+    if access_token:
+        st.session_state.meli_manual_token = access_token.strip()
+
+    col1, col2, col3 = st.columns(3)
+    shipment_id = col1.text_input("Shipment ID (opcional)")
+    order_id = col2.text_input("Order ID (opcional)")
+    pack_id = col3.text_input("Pack ID (opcional)")
+    asignacion = st.text_input("Nombre de asignación (para guardar PDF, opcional)")
+
+    if st.button("🔍 Probar impresión de guía", use_container_width=True):
+        if not access_token:
+            st.error("Debes ingresar un Access Token válido.")
+        else:
+            token = access_token.strip()
+            headers = {"Authorization": f"Bearer {token}"}
+            shipment = shipment_id.strip()
+
+            # Si no se ingresó shipment, intentar derivar desde order/pack
+            if not shipment and order_id:
+                r = requests.get(
+                    f"https://api.mercadolibre.com/orders/{order_id}", headers=headers, timeout=20
+                )
+                if r.status_code == 200:
+                    shipment = (r.json().get("shipping") or {}).get("id")
+            if not shipment and pack_id:
+                r = requests.get(
+                    f"https://api.mercadolibre.com/packs/{pack_id}", headers=headers, timeout=20
+                )
+                if r.status_code == 200:
+                    shipment = (r.json().get("shipment") or {}).get("id")
+
+            if not shipment:
+                st.error("No se pudo derivar shipment_id desde order/pack.")
+            else:
+                r = requests.get(
+                    "https://api.mercadolibre.com/shipment_labels",
+                    params={"shipment_ids": shipment, "response_type": "pdf"},
+                    headers=headers,
+                    timeout=25,
+                )
+                if r.status_code == 200 and r.content[:4] == b"%PDF":
+                    st.success(f"Etiqueta lista (shipment_id={shipment}).")
+                    st.download_button(
+                        "📄 Descargar etiqueta (PDF)",
+                        data=r.content,
+                        file_name=f"{(asignacion or f'etiqueta_{shipment}')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                else:
+                    st.error(f"Error {r.status_code}: {r.text[:300]}")
