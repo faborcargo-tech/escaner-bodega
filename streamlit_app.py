@@ -3,6 +3,7 @@
 import io
 import time
 from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
 import pandas as pd
 import pytz
 import requests
@@ -27,23 +28,23 @@ TZ = pytz.timezone("America/Santiago")
 # ✅ HELPERS STORAGE / DB
 # ==============================
 
-def _get_public_url(path: str) -> str | None:
+def _get_public_url(path: str) -> Optional[str]:
     try:
         url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(path)
         if isinstance(url, dict):
             return url.get("publicUrl") or url.get("public_url") or url.get("publicURL")
-        return url
+        return url  # SDKs antiguos retornan string
     except Exception:
         return None
 
-def upload_pdf_to_storage(asignacion: str, file_like) -> str | None:
+def upload_pdf_to_storage(asignacion: str, file_like) -> Optional[str]:
     if not asignacion or file_like is None:
         return None
     key_path = f"{asignacion}.pdf"
     try:
         data = file_like.read() if hasattr(file_like, "read") else file_like
         supabase.storage.from_(STORAGE_BUCKET).upload(
-            key_path, data, {"upsert": "true"}
+            key_path, data, {"upsert": "true", "content-type": "application/pdf"}
         )
     except Exception as e:
         st.error(f"❌ Error subiendo PDF: {e}")
@@ -54,7 +55,7 @@ def url_disponible(url: str) -> bool:
     if not url:
         return False
     try:
-        r = requests.head(url, timeout=5)
+        r = requests.head(url, allow_redirects=True, timeout=5)
         return r.status_code == 200
     except Exception:
         return False
@@ -92,6 +93,8 @@ def insert_no_coincidente(guia: str):
             "comentario": "",
             "descripcion": "",
             "titulo": "",
+            "orden_meli": "",
+            "pack_id": "",
         }
     ).execute()
 
@@ -147,6 +150,7 @@ def process_scan(guia: str):
         else:
             st.warning("⚠️ No hay etiqueta PDF disponible para esta guía.")
 
+        # Log adicional (no romper si falla por RLS)
         try:
             now = datetime.now(TZ).isoformat()
             supabase.table(TABLE_NAME).insert(
@@ -211,6 +215,7 @@ def render_log_with_download_buttons(rows: list, page: str):
     if not rows:
         st.info("No hay registros aún.")
         return
+
     cols = (
         ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
         if page == "imprimir"
@@ -219,6 +224,7 @@ def render_log_with_download_buttons(rows: list, page: str):
     hc = st.columns([2, 2, 2, 2, 1])
     for i, h in enumerate(cols):
         hc[i].markdown(f"**{h}**")
+
     for r in rows:
         asign = r.get("asignacion", "")
         guia = r.get("guia", "")
@@ -251,26 +257,256 @@ def render_log_with_download_buttons(rows: list, page: str):
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_val = st.text_area("Escanea aquí (o pega el número de guía)")
     if st.button("Procesar escaneo"):
-        process_scan(scan_val.strip())
+        process_scan((scan_val or "").strip())
 
-    st.subheader("Registro de escaneos (últimos 60 días)")
-    rows = get_logs(st.session_state.page)
-    render_log_with_download_buttons(rows, st.session_state.page)
+st.subheader("Registro de escaneos (últimos 60 días)")
+rows = get_logs(st.session_state.page)
+render_log_with_download_buttons(rows, st.session_state.page)
+
+# =========================================================
+# 🔄 SINCRONIZAR VENTAS – pestaña DATOS
+# =========================================================
+
+def _meli_headers(token: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h = {"Authorization": f"Bearer {token}"}
+    if extra:
+        h.update(extra)
+    return h
+
+def _meli_get_seller_id(token: str) -> Optional[int]:
+    try:
+        r = requests.get(
+            "https://api.mercadolibre.com/users/me",
+            headers=_meli_headers(token),
+            timeout=20,
+        )
+        if r.status_code == 200:
+            return (r.json() or {}).get("id")
+    except Exception:
+        pass
+    return None
+
+def _meli_get_order_notes(order_id: str, token: str) -> str:
+    """Devuelve la primera nota (asignación FBCXXXX) si existe."""
+    try:
+        r = requests.get(
+            f"https://api.mercadolibre.com/orders/{order_id}/notes",
+            headers=_meli_headers(token),
+            timeout=20,
+        )
+        if r.status_code == 200:
+            notes = r.json()
+            if isinstance(notes, list) and notes:
+                return (notes[0].get("note") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+def _meli_get_envio_status(shipment_id: Any, token: str) -> str:
+    if not shipment_id:
+        return ""
+    try:
+        r = requests.get(
+            f"https://api.mercadolibre.com/shipments/{shipment_id}",
+            headers=_meli_headers(token, {"x-format-new": "true"}),
+            timeout=20,
+        )
+        if r.status_code == 200:
+            return (r.json() or {}).get("status", "")
+    except Exception:
+        pass
+    return ""
+
+def _meli_get_item_picture(item_id: str, token: str) -> str:
+    if not item_id:
+        return ""
+    try:
+        r = requests.get(
+            f"https://api.mercadolibre.com/items/{item_id}",
+            headers=_meli_headers(token),
+            timeout=20,
+        )
+        if r.status_code == 200:
+            data = r.json() or {}
+            pics = data.get("pictures") or []
+            if pics:
+                return pics[0].get("secure_url") or pics[0].get("url") or ""
+            # Fallback
+            return data.get("thumbnail") or ""
+    except Exception:
+        pass
+    return ""
+
+def _map_order_to_row(order: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """Mapea una orden de Meli a la fila de Supabase según tu requerimiento."""
+    order_id = str(order.get("id", ""))
+    pack_id = str(order.get("pack_id") or (order.get("pack") or {}).get("id") or "")
+    status = order.get("status", "")
+
+    items = order.get("order_items") or []
+    first = items[0] if items else {}
+    item_info = first.get("item") or {}
+
+    # seller_sku puede venir en item.seller_sku o seller_custom_field dependiendo del flujo
+    asin = item_info.get("seller_sku") or item_info.get("seller_custom_field") or ""
+    cantidad = first.get("quantity") or 0
+    titulo = item_info.get("title") or ""
+
+    shipping_id = (order.get("shipping") or {}).get("id")
+    estado_envio = _meli_get_envio_status(shipping_id, token)
+
+    asignacion = _meli_get_order_notes(order_id, token)
+    url_imagen = _meli_get_item_picture(item_info.get("id") or "", token)
+
+    # Campos que deben quedar vacíos para edición manual o impresión posterior
+    return {
+        "asignacion": asignacion,         # de notas (FBCXXXX)
+        "guia": "",                       # manual
+        "estado_orden": status,
+        "estado_envio": estado_envio,
+        "asin": asin,
+        "cantidad": cantidad,
+        "titulo": titulo,
+        "orden_meli": order_id,
+        "pack_id": pack_id,
+        "url_imagen": url_imagen,
+        "archivo_adjunto": "",            # manual o por impresión
+        # comentario / descripcion / fechas se mantienen por otros flujos
+    }
+
+def sync_meli_orders(days: int = 60):
+    """Sincroniza órdenes de los últimos `days` días. Inserta nuevas y actualiza cambios."""
+    token = (st.session_state.get("meli_manual_token") or "").strip()
+    if not token:
+        st.error("❌ No hay Access Token guardado. Ve a la pestaña PRUEBAS y guarda el token.")
+        return
+
+    seller_id = _meli_get_seller_id(token)
+    if not seller_id:
+        st.error("❌ No se pudo obtener el seller_id con el token indicado.")
+        return
+
+    st.info(f"⏳ Sincronizando ventas de los últimos {days} días…")
+
+    now = datetime.utcnow()
+    date_from = (now - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00.000-00:00")
+    date_to = now.strftime("%Y-%m-%dT23:59:59.999-00:00")
+
+    base_url = "https://api.mercadolibre.com/orders/search"
+    limit = 50
+    offset = 0
+    inserted, updated = 0, 0
+
+    while True:
+        params = {
+            "seller": seller_id,
+            "order.date_created.from": date_from,
+            "order.date_created.to": date_to,
+            "sort": "date_desc",
+            "limit": limit,
+            "offset": offset,
+        }
+        try:
+            r = requests.get(base_url, headers=_meli_headers(token), params=params, timeout=40)
+        except Exception as e:
+            st.error(f"Error de red al consultar órdenes: {e}")
+            break
+
+        if r.status_code != 200:
+            st.error(f"Error {r.status_code} al consultar órdenes: {r.text[:300]}")
+            break
+
+        payload = r.json() or {}
+        orders = payload.get("results") or []
+        if not orders:
+            break
+
+        for order in orders:
+            row = _map_order_to_row(order, token)
+            order_id = row["orden_meli"]
+
+            try:
+                existing = supabase.table(TABLE_NAME).select("id").eq("orden_meli", order_id).execute().data
+                if existing:
+                    # Solo actualizamos campos de sincronización; no tocamos guía, comentario, descripción, fechas
+                    supabase.table(TABLE_NAME).update({
+                        "asignacion": row["asignacion"],
+                        "estado_orden": row["estado_orden"],
+                        "estado_envio": row["estado_envio"],
+                        "asin": row["asin"],
+                        "cantidad": row["cantidad"],
+                        "titulo": row["titulo"],
+                        "pack_id": row["pack_id"],
+                        "url_imagen": row["url_imagen"],
+                    }).eq("orden_meli", order_id).execute()
+                    updated += 1
+                else:
+                    supabase.table(TABLE_NAME).insert(row).execute()
+                    inserted += 1
+            except Exception as e:
+                st.warning(f"⚠️ Error guardando orden {order_id}: {e}")
+
+        paging = payload.get("paging") or {}
+        total = paging.get("total") or 0
+        offset += limit
+        if offset >= total:
+            break
+
+    st.success(f"✅ Sincronización completa: {inserted} nuevas · {updated} actualizadas.")
+    st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# Bloque UI para pestaña DATOS
+if st.session_state.page == "datos":
+    st.subheader("📦 Sincronización con Mercado Libre")
+    colA, colB, colC = st.columns([2, 2, 6])
+    with colA:
+        if st.button("🔄 Sincronizar ventas (últimos 60 días)", use_container_width=True):
+            sync_meli_orders(days=60)
+    with colB:
+        st.caption(f"Última sincronización: {st.session_state.get('last_sync', '—')}")
+
+    st.markdown("---")
+    st.subheader("Tabla de órdenes")
+    try:
+        # Mostrar todo lo que hay en la base (descendente por id para ver lo nuevo arriba)
+        data = (
+            supabase.table(TABLE_NAME)
+            .select("*")
+            .order("id", desc=True)
+            .execute()
+            .data
+            or []
+        )
+        df = pd.DataFrame(data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"No se pudo cargar la tabla: {e}")
 
 # =========================================================
 # 🔧 PRUEBAS — Token manual + impresión de guía PDF
 # =========================================================
 
 if st.session_state.page == "pruebas":
-    st.subheader("Probar descarga de etiqueta con token manual")
+    st.subheader("Access Token manual")
 
     access_token = st.text_area(
         "Access Token (pégalo aquí, generado desde Postman)",
         value=st.session_state.get("meli_manual_token", ""),
         height=100,
     )
-    if access_token:
-        st.session_state.meli_manual_token = access_token.strip()
+
+    cols_tok = st.columns(2)
+    with cols_tok[0]:
+        if st.button("💾 Guardar token manual", use_container_width=True):
+            st.session_state.meli_manual_token = (access_token or "").strip()
+            st.success("Token guardado en sesión.")
+    with cols_tok[1]:
+        if st.button("🗑️ Limpiar token", use_container_width=True):
+            st.session_state.meli_manual_token = ""
+            st.info("Token limpiado de la sesión.")
+
+    st.markdown("---")
+    st.subheader("Probar descarga de etiqueta con token manual")
 
     col1, col2, col3 = st.columns(3)
     shipment_id = col1.text_input("Shipment ID (opcional)")
@@ -279,23 +515,27 @@ if st.session_state.page == "pruebas":
     asignacion = st.text_input("Nombre de asignación (para guardar PDF, opcional)")
 
     if st.button("🔍 Probar impresión de guía", use_container_width=True):
-        if not access_token:
-            st.error("Debes ingresar un Access Token válido.")
+        token = (st.session_state.get("meli_manual_token") or "").strip()
+        if not token:
+            st.error("Debes guardar un Access Token válido.")
         else:
-            token = access_token.strip()
             headers = {"Authorization": f"Bearer {token}"}
-            shipment = shipment_id.strip()
+            shipment = (shipment_id or "").strip()
 
             # Si no se ingresó shipment, intentar derivar desde order/pack
             if not shipment and order_id:
                 r = requests.get(
-                    f"https://api.mercadolibre.com/orders/{order_id}", headers=headers, timeout=20
+                    f"https://api.mercadolibre.com/orders/{order_id}",
+                    headers=headers,
+                    timeout=20,
                 )
                 if r.status_code == 200:
                     shipment = (r.json().get("shipping") or {}).get("id")
             if not shipment and pack_id:
                 r = requests.get(
-                    f"https://api.mercadolibre.com/packs/{pack_id}", headers=headers, timeout=20
+                    f"https://api.mercadolibre.com/packs/{pack_id}",
+                    headers=headers,
+                    timeout=20,
                 )
                 if r.status_code == 200:
                     shipment = (r.json().get("shipment") or {}).get("id")
