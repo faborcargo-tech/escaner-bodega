@@ -771,7 +771,6 @@ st.rerun()
 if st.session_state.page == "pruebas":
 st.subheader("Prueba de impresión de etiqueta (no toca la base)")
 
-```
 colI, colO, colP = st.columns([1, 2, 1])
 shipment_id_input = colI.text_input("shipment_id (opcional)")
 order_id_input = colO.text_input("order_id (opcional)")
