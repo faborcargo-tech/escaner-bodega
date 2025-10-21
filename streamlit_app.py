@@ -334,31 +334,46 @@ st.header(
 )
 
 # ==============================
-# ✅ CAJA DE ESCANEO (limpieza segura en ambas páginas)
+# ✅ CAJA DE ESCANEO (nuevo patrón con versión de key)
 # ==============================
+def scan_box_for_current_page():
+    """
+    Caja de escaneo con:
+    - Botón 'Procesar escaneo'
+    - Botón '🧹 Borrar campo'
+    - Autolimpieza al procesar (sin rerun, sin tocar SessionState del widget activo)
+    """
+    page = st.session_state.page
+    ver_key = f"scan_ver_{page}"
+    if ver_key not in st.session_state:
+        st.session_state[ver_key] = 0
+
+    # Key del text_area cambia cuando incrementamos la versión -> aparece vacío
+    current_key = f"scan_{page}_{st.session_state[ver_key]}"
+
+    st.text_area("Escanea aquí (o pega el número de guía)", key=current_key)
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        procesar = st.button("Procesar escaneo", key=f"btn_proc_{page}_{st.session_state[ver_key]}")
+    with c2:
+        limpiar = st.button("🧹 Borrar campo", key=f"btn_clear_{page}_{st.session_state[ver_key]}")
+
+    if procesar:
+        val = (st.session_state.get(current_key) or "").strip()
+        process_scan(val)
+        # autolimpieza: siguiente render usa otro key => campo vacío
+        st.session_state[ver_key] += 1
+
+    if limpiar:
+        st.session_state[ver_key] += 1
+        toast("Campo borrado.", "✅")
 
 if st.session_state.page in ("ingresar", "imprimir"):
-    scan_key = f"scan_{st.session_state.page}"
-    clear_flag = f"{scan_key}_clear"
-
-    # Limpiar en el run siguiente (evita StreamlitAPIException)
-    if st.session_state.get(clear_flag):
-        st.session_state[scan_key] = ""
-        del st.session_state[clear_flag]
-
-    st.text_area("Escanea aquí (o pega el número de guía)", key=scan_key)
-
-    if st.button("Procesar escaneo"):
-        val = (st.session_state.get(scan_key) or "").strip()
-        process_scan(val)
-        st.session_state[clear_flag] = True
-        try:
-            st.rerun()
-        except Exception:
-            st.experimental_rerun()
+    scan_box_for_current_page()
 
     st.subheader("Registro de escaneos (últimos 60 días)")
     rows = get_logs(st.session_state.page)
+
     # >>> NO TOCAR <<<
     def render_log_with_download_buttons(rows: list, page: str):
         if not rows:
