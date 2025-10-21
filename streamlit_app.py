@@ -1,10 +1,7 @@
 # ================================================
 #  Escáner Bodega — streamlit_app.py
-#  NOTA IMPORTANTE:
-#  Hay bloques marcados como  >>> NO TOCAR  <<<
-#  Esos bloques están estabilizados para no cambiarlos
-#  de versión en versión.  Solo modificar lo que se indique
-#  explícitamente en los pedidos.
+#  NOTA:
+#  Bloques marcados >>> NO TOCAR <<< están estabilizados.
 # ================================================
 
 import io
@@ -13,6 +10,7 @@ import re
 import json
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List, Tuple
+
 import pandas as pd
 import pytz
 import requests
@@ -38,19 +36,18 @@ TZ = pytz.timezone("America/Santiago")
 MANUAL_FIELDS = ["guia", "archivo_adjunto", "descripcion", "orden_amazon"]
 
 # ==============================
-# ✅ UTILS: hora CL y toasts  (AJUSTADO)
+# ✅ UTILS (hora Chile + toast)
 # ==============================
 
 def now_chile_iso_naive() -> str:
-    """Fecha/hora de Chile, sin tzinfo (para columnas timestamp)."""
+    """Fecha/hora de Chile, sin tzinfo (para columnas timestamp Supabase)."""
     return datetime.now(TZ).replace(tzinfo=None).isoformat()
 
 def toast(msg: str, icon: str = "✅"):
-    """Notificación breve y no intrusiva."""
+    """Notificación corta no intrusiva."""
     try:
-        st.toast(msg, icon=icon)  # streamlit >= 1.27
+        st.toast(msg, icon=icon)
     except Exception:
-        # Fallback
         if icon == "✅":
             st.success(msg)
         elif icon == "⚠️":
@@ -59,7 +56,7 @@ def toast(msg: str, icon: str = "✅"):
             st.info(msg)
 
 # ==============================
-# ✅ HELPERS STORAGE / DB  (>>> NO TOCAR <<< salvo comentarios)
+# ✅ HELPERS STORAGE / DB  (>>> NO TOCAR <<<)
 # ==============================
 
 def _get_public_url(path: str) -> Optional[str]:
@@ -72,7 +69,7 @@ def _get_public_url(path: str) -> Optional[str]:
         return None
 
 def upload_pdf_to_storage(asignacion: str, file_like) -> Optional[str]:
-    """Sube PDF (solo si válido) y retorna URL pública."""
+    """Sube PDF (si es válido) y retorna URL pública."""
     if not asignacion or file_like is None:
         return None
     key_path = f"{asignacion}.pdf"
@@ -100,13 +97,11 @@ def lookup_by_guia(guia: str):
     return res.data[0] if res.data else None
 
 def update_ingreso(guia: str):
-    # AJUSTADO: hora Chile
     supabase.table(TABLE_NAME).update(
         {"fecha_ingreso": now_chile_iso_naive(), "estado_escaneo": "INGRESADO CORRECTAMENTE!"}
     ).eq("guia", guia).execute()
 
 def set_impreso_ok(guia: str, archivo_public: str):
-    # AJUSTADO: hora Chile
     supabase.table(TABLE_NAME).update(
         {
             "fecha_impresion": now_chile_iso_naive(),
@@ -140,7 +135,6 @@ def insert_no_coincidente(guia: str):
     ).execute()
 
 def get_logs(page: str):
-    # AJUSTADO: filtro con hora Chile (naive)
     cutoff = (datetime.now(TZ) - timedelta(days=60)).replace(tzinfo=None).isoformat()
     field = "fecha_ingreso" if page == "ingresar" else "fecha_impresion"
     res = (
@@ -153,7 +147,7 @@ def get_logs(page: str):
     return res.data or []
 
 # ==============================
-# ✅ MERCADO LIBRE helpers (token manual)  (>>> NO TOCAR <<<)
+# ✅ MERCADO LIBRE helpers (token manual en sesión)  (>>> NO TOCAR <<<)
 # ==============================
 
 def _meli_headers(token: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -194,7 +188,6 @@ def download_label_pdf(token: str, shipment_id: str) -> Tuple[Optional[bytes], O
         )
         if r.status_code == 200 and r.content[:4] == b"%PDF":
             return r.content, None
-        # mensajes claros
         try:
             j = r.json()
         except Exception:
@@ -211,7 +204,7 @@ def download_label_pdf(token: str, shipment_id: str) -> Tuple[Optional[bytes], O
         return None, f"Error de red: {e}"
 
 # ==============================
-# ✅ ESCANEO (INGRESAR / IMPRIMIR)  (AJUSTADO donde correspondía)
+# ✅ ESCANEO (INGRESAR / IMPRIMIR)
 # ==============================
 
 def process_scan(guia: str):
@@ -226,18 +219,18 @@ def process_scan(guia: str):
         toast(f"Guía {guia} no encontrada. Se registró como NO COINCIDENTE.", "⚠️")
         return
 
-    # ----- INGRESAR (AJUSTADO: toast y hora Chile) -----
+    # ----- INGRESAR -----
     if st.session_state.page == "ingresar":
         update_ingreso(guia)
         toast(f"Guía {guia} ingresada correctamente.", "✅")
         return
 
-    # ----- IMPRIMIR (AJUSTADO: no marcar impreso si no hay PDF, sin duplicados) -----
+    # ----- IMPRIMIR -----
     if st.session_state.page == "imprimir":
         asignacion = (match.get("asignacion") or "etiqueta").strip() or "etiqueta"
         archivo_public = match.get("archivo_adjunto") or ""
 
-        # 1) Si ya hay PDF válido -> botón (NO CAMBIA estado ni fecha)
+        # 1) Si ya hay PDF válido -> botón
         if archivo_public and url_disponible(archivo_public):
             try:
                 pdf_bytes = requests.get(archivo_public, timeout=10).content
@@ -257,7 +250,7 @@ def process_scan(guia: str):
             except Exception:
                 st.warning("⚠️ No se pudo descargar el PDF desde Storage. Intentaré obtener una nueva etiqueta…")
 
-        # 2) Obtener desde ML con token guardado en PRUEBAS
+        # 2) Token manual guardado en PRUEBAS
         token = (st.session_state.get("meli_manual_token") or "").strip()
         if not token:
             st.error("No hay token guardado (PRUEBAS). Guarda uno para poder imprimir.")
@@ -278,14 +271,14 @@ def process_scan(guia: str):
             toast("No se imprimió. Revisa el estado del envío.", "⚠️")
             return
 
-        # 3) Subir a Storage y ACTUALIZAR (sin insertar de nuevo)  (AJUSTADO)
+        # 3) Subir a Storage y actualizar fila
         url_publica = upload_pdf_to_storage(asignacion, pdf)
         if not url_publica:
             st.error("No se pudo subir la etiqueta a Storage.")
             toast("No se pudo subir el PDF.", "⚠️")
             return
 
-        set_impreso_ok(guia, url_publica)  # setea fecha_impresion Chile + estado + adjunto
+        set_impreso_ok(guia, url_publica)
 
         st.success(f"Etiqueta lista (shipment_id={shipment_id}).")
         st.download_button(
@@ -341,75 +334,81 @@ st.header(
 )
 
 # ==============================
-# ✅ LOGS + caja de escaneo (AJUSTADO: limpiar textbox al procesar)
+# ✅ CAJA DE ESCANEO (limpieza segura en ambas páginas)
 # ==============================
-
-def render_log_with_download_buttons(rows: list, page: str):
-    if not rows:
-        st.info("No hay registros aún.")
-        return
-
-    cols = (
-        ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
-        if page == "imprimir"
-        else ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
-    )
-    hc = st.columns([2, 2, 2, 2, 1])
-    for i, h in enumerate(cols):
-        hc[i].markdown(f"**{h}**")
-
-    for r in rows:
-        asign = r.get("asignacion", "")
-        guia = r.get("guia", "")
-        fecha = r.get("fecha_impresion") if page == "imprimir" else r.get("fecha_ingreso")
-        estado = r.get("estado_escaneo", "")
-        url = r.get("archivo_adjunto", "")
-        c = st.columns([2, 2, 2, 2, 1])
-        c[0].write(asign or "-")
-        c[1].write(guia or "-")
-        c[2].write((str(fecha)[:19]) if fecha else "-")
-        c[3].write(estado or "-")
-        if url and url_disponible(url):
-            try:
-                pdf_bytes = requests.get(url, timeout=8).content
-                if pdf_bytes[:4] == b"%PDF":
-                    c[4].download_button(
-                        "⇩",
-                        data=pdf_bytes,
-                        file_name=f"{(asign or 'etiqueta')}.pdf",
-                        mime="application/pdf",
-                        key=f"dl_{asign}_{guia}_{time.time()}",
-                    )
-                else:
-                    c[4].write("No válido")
-            except Exception:
-                c[4].write("No disponible")
-        else:
-            c[4].write("No disponible")
 
 if st.session_state.page in ("ingresar", "imprimir"):
     scan_key = f"scan_{st.session_state.page}"
+    clear_flag = f"{scan_key}_clear"
+
+    # Limpiar en el run siguiente (evita StreamlitAPIException)
+    if st.session_state.get(clear_flag):
+        st.session_state[scan_key] = ""
+        del st.session_state[clear_flag]
+
     st.text_area("Escanea aquí (o pega el número de guía)", key=scan_key)
+
     if st.button("Procesar escaneo"):
         val = (st.session_state.get(scan_key) or "").strip()
         process_scan(val)
-        st.session_state[scan_key] = ""  # AJUSTADO: limpiar textbox siempre
+        st.session_state[clear_flag] = True
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
 
     st.subheader("Registro de escaneos (últimos 60 días)")
     rows = get_logs(st.session_state.page)
+    # >>> NO TOCAR <<<
+    def render_log_with_download_buttons(rows: list, page: str):
+        if not rows:
+            st.info("No hay registros aún.")
+            return
+        cols = (
+            ["Asignación", "Guía", "Fecha impresión", "Estado", "Descargar"]
+            if page == "imprimir"
+            else ["Asignación", "Guía", "Fecha ingreso", "Estado", "Descargar"]
+        )
+        hc = st.columns([2, 2, 2, 2, 1])
+        for i, h in enumerate(cols):
+            hc[i].markdown(f"**{h}**")
+        for r in rows:
+            asign = r.get("asignacion", "")
+            guia = r.get("guia", "")
+            fecha = r.get("fecha_impresion") if page == "imprimir" else r.get("fecha_ingreso")
+            estado = r.get("estado_escaneo", "")
+            url = r.get("archivo_adjunto", "")
+            c = st.columns([2, 2, 2, 2, 1])
+            c[0].write(asign or "-")
+            c[1].write(guia or "-")
+            c[2].write((str(fecha)[:19]) if fecha else "-")
+            c[3].write(estado or "-")
+            if url and url_disponible(url):
+                try:
+                    pdf_bytes = requests.get(url, timeout=8).content
+                    if pdf_bytes[:4] == b"%PDF":
+                        c[4].download_button(
+                            "⇩",
+                            data=pdf_bytes,
+                            file_name=f"{(asign or 'etiqueta')}.pdf",
+                            mime="application/pdf",
+                            key=f"dl_{asign}_{guia}_{time.time()}",
+                        )
+                    else:
+                        c[4].write("No válido")
+                except Exception:
+                    c[4].write("No disponible")
+            else:
+                c[4].write("No disponible")
     render_log_with_download_buttons(rows, st.session_state.page)
 
 # =========================================================
-# 🔄 SINCRONIZACIÓN (pestaña DATOS)  (>>> NO TOCAR <<< salvo columnas pedidas)
+# 🔄 SINCRONIZACIÓN (pestaña DATOS)
 # =========================================================
 
 def _meli_get_seller_id(token: str) -> Optional[int]:
     try:
-        r = requests.get(
-            "https://api.mercadolibre.com/users/me",
-            headers=_meli_headers(token),
-            timeout=20,
-        )
+        r = requests.get("https://api.mercadolibre.com/users/me", headers=_meli_headers(token), timeout=20)
         if r.status_code == 200:
             return (r.json() or {}).get("id")
     except Exception:
@@ -425,7 +424,7 @@ def _parse_ts(s: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
-# --- Notas FBC (igual a note) ---
+# ---- Notas FBC (igual a "note") ----
 def _extract_notes_list(payload: Any) -> List[str]:
     texts: List[str] = []
     def pick_from_result(d: Dict[str, Any]):
@@ -445,8 +444,8 @@ def _extract_notes_list(payload: Any) -> List[str]:
                             pick_from_result(res)
                 else:
                     pick_from_result(entry)
-            else:
-                if entry: texts.append(str(entry))
+            elif entry:
+                texts.append(str(entry))
     elif isinstance(payload, dict):
         results = payload.get("results")
         if isinstance(results, list):
@@ -460,10 +459,7 @@ def _extract_notes_list(payload: Any) -> List[str]:
 def _get_order_note(order_id: str, token: str) -> str:
     headers = _meli_headers(token)
     try:
-        r = requests.get(
-            f"https://api.mercadolibre.com/orders/{order_id}/notes",
-            headers=headers, timeout=15,
-        )
+        r = requests.get(f"https://api.mercadolibre.com/orders/{order_id}/notes", headers=headers, timeout=15)
         if r.status_code == 200:
             notes = _extract_notes_list(r.json())
             if notes:
@@ -471,10 +467,7 @@ def _get_order_note(order_id: str, token: str) -> str:
     except Exception:
         pass
     try:
-        r2 = requests.get(
-            f"https://api.mercadolibre.com/orders/{order_id}",
-            headers=headers, timeout=15,
-        )
+        r2 = requests.get(f"https://api.mercadolibre.com/orders/{order_id}", headers=headers, timeout=15)
         if r2.status_code == 200:
             raw = json.dumps(r2.json(), ensure_ascii=False)
             m = re.search(r"\bFBC[0-9A-Z]{3,}\b", raw, re.IGNORECASE)
@@ -503,11 +496,7 @@ def _get_item_picture(item_id: str, token: str) -> str:
     if not item_id:
         return ""
     try:
-        r = requests.get(
-            f"https://api.mercadolibre.com/items/{item_id}",
-            headers=_meli_headers(token),
-            timeout=15,
-        )
+        r = requests.get(f"https://api.mercadolibre.com/items/{item_id}", headers=_meli_headers(token), timeout=15)
         if r.status_code == 200:
             data = r.json() or {}
             pics = data.get("pictures") or []
@@ -520,11 +509,8 @@ def _get_item_picture(item_id: str, token: str) -> str:
 
 def _map_order(order: Dict[str, Any]) -> Tuple[str, str, str, int, str, str, str, str, str]:
     oid = str(order.get("id", ""))
-    # Estado de pagos (approved, refunded, in_mediation) con fallback a order.status
-    pay_status = None
     pays = order.get("payments") or []
-    if isinstance(pays, list) and pays:
-        pay_status = (pays[0] or {}).get("status")
+    pay_status = (pays[0] or {}).get("status") if isinstance(pays, list) and pays else None
     status = pay_status or order.get("status", "")
     created = _parse_ts(order.get("date_created"))
     order_items = order.get("order_items") or []
@@ -666,7 +652,7 @@ def sync_meli_orders(days: int = 60):
     st.success(f"✅ Sincronización: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ====== UI DATOS: imagen más angosta + Guía antes de Título (AJUSTADO) ======
+# ====== UI DATOS ======
 
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
@@ -680,7 +666,7 @@ if st.session_state.page == "datos":
     st.markdown("---")
     st.subheader("Tabla de órdenes (DB)")
 
-    # CSS: miniatura grande pero columna angosta (~160 px)  (AJUSTADO)
+    # CSS: miniatura grande pero columna angosta (~160 px)
     st.markdown("""
         <style>
         [data-testid="stDataEditor"] tbody tr,
@@ -707,7 +693,7 @@ if st.session_state.page == "datos":
         )
         df = pd.DataFrame(data)
 
-        # -------- Filtros (>>> NO TOCAR <<<) --------
+        # -------- Filtros --------
         with st.expander("🔎 Filtros", expanded=False):
             estados_orden_all = sorted([x for x in df.get("estado_orden", []).dropna().unique().tolist()])
             estados_envio_all = sorted([x for x in df.get("estado_envio", []).dropna().unique().tolist()])
@@ -754,7 +740,7 @@ if st.session_state.page == "datos":
             dt = pd.to_datetime(df["fecha_venta"], errors="coerce").dt.date
             df = df[(dt >= date_from) & (dt <= date_to)]
 
-        # -------- Columnas derivadas (links) (>>> NO TOCAR <<<) --------
+        # -------- Columnas derivadas (links) --------
         def asin_url_row(row) -> Optional[str]:
             asin = (row.get("asin") or "").strip()
             qty = int(row.get("cantidad") or 1)
@@ -773,7 +759,7 @@ if st.session_state.page == "datos":
             lambda x: f"https://www.amazon.com/your-orders/order-details?orderID={x}" if x else None
         )
 
-        # ORDEN DE COLUMNAS — Guía ANTES de Título  (AJUSTADO solo aquí)
+        # Orden columnas (Guía ANTES de Título)
         desired_order = [
             "id",
             "url_imagen",
@@ -784,7 +770,7 @@ if st.session_state.page == "datos":
             "estado_orden",
             "estado_envio",
             "asin_link", "cantidad", "orden_amazon", "orden_amazon_link",
-            "guia", "titulo",                 #  <<< GUIA antes de TÍTULO
+            "guia", "titulo",
             "archivo_adjunto", "descripcion",
             "comentario", "fecha_sincronizacion", "fecha_ingreso", "fecha_impresion",
         ]
@@ -801,7 +787,7 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             column_config={
-                "url_imagen": cc.ImageColumn("Imagen", help="Miniatura", width=160),  # AJUSTADO ancho
+                "url_imagen": cc.ImageColumn("Imagen", help="Miniatura", width=160),
                 "fecha_venta": cc.DatetimeColumn("Fecha venta"),
                 "asignacion": cc.TextColumn("Asignación"),
                 "orden_meli": cc.TextColumn("Orden ML"),
@@ -858,11 +844,11 @@ if st.session_state.page == "datos":
         st.error(f"No se pudo cargar la tabla: {e}")
 
 # =========================================================
-# 🔧 PRUEBAS — Token manual + etiqueta + notas ML  (>>> NO TOCAR <<<)
+# 🔧 PRUEBAS — Token manual + etiqueta + notas ML
 # =========================================================
 
 def upsert_order_note(order_id: str, note_text: str, token: str) -> Tuple[bool, str]:
-    """Crea o actualiza la nota de la orden."""
+    """Crea o actualiza la nota (note) de la orden."""
     headers = _meli_headers(token, {"Content-Type": "application/json"})
     note_id = None
     try:
