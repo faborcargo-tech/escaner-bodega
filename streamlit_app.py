@@ -4,7 +4,7 @@ import io
 import time
 import re
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List, Tuple
 import pandas as pd
 import pytz
@@ -305,17 +305,11 @@ def _parse_ts(s: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
+# --- Notas FBC (igual a "note") ---
 def _extract_notes_list(payload: Any) -> List[str]:
-    """
-    Normaliza la respuesta de /orders/{id}/notes:
-    - En tu captura viene como: [ {"results":[{"note":"FBCXXXX", ...}], "order_id": ...} ]
-    - También soporta dict simple o lista simple.
-    Devuelve lista de strings (priorizando 'note'), sin limpiar.
-    """
     texts: List[str] = []
 
     def pick_from_result(d: Dict[str, Any]):
-        # Prioridad exacta a 'note' como pediste:
         if "note" in d and d["note"]:
             texts.append(str(d["note"]))
         else:
@@ -334,7 +328,6 @@ def _extract_notes_list(payload: Any) -> List[str]:
                 else:
                     pick_from_result(entry)
             else:
-                # elemento lista no dict
                 if entry:
                     texts.append(str(entry))
     elif isinstance(payload, dict):
@@ -349,13 +342,7 @@ def _extract_notes_list(payload: Any) -> List[str]:
     return texts
 
 def _get_order_note(order_id: str, token: str) -> str:
-    """
-    Devuelve la asignación EXACTA igual a 'note' (en mayúsculas) si existe en /orders/{id}/notes.
-    Si no hay nota, intenta otras claves y, como último recurso, escanea /orders/{id}.
-    """
     headers = _meli_headers(token)
-
-    # 1) /orders/{id}/notes
     try:
         r = requests.get(
             f"https://api.mercadolibre.com/orders/{order_id}/notes",
@@ -365,12 +352,9 @@ def _get_order_note(order_id: str, token: str) -> str:
         if r.status_code == 200:
             notes = _extract_notes_list(r.json())
             if notes:
-                # Tomamos la última (más reciente) y la normalizamos a MAYÚSCULAS
                 return notes[-1].strip().upper()
     except Exception:
         pass
-
-    # 2) Fallback /orders/{id} — solo si no hay ninguna nota
     try:
         r2 = requests.get(
             f"https://api.mercadolibre.com/orders/{order_id}",
@@ -379,7 +363,6 @@ def _get_order_note(order_id: str, token: str) -> str:
         )
         if r2.status_code == 200:
             raw = json.dumps(r2.json(), ensure_ascii=False)
-            # Si por algún motivo quieres aún reconocer FBC… lo dejamos como emergencia
             m = re.search(r"\bFBC[0-9A-Z]{3,}\b", raw, re.IGNORECASE)
             if m:
                 return m.group(0).upper()
@@ -424,7 +407,12 @@ def _get_item_picture(item_id: str, token: str) -> str:
 def _map_order(order: Dict[str, Any]) -> Tuple[str, str, str, int, str, str, str, str, str]:
     """Extrae datos base del payload de /orders/search."""
     oid = str(order.get("id", ""))
-    status = order.get("status", "")
+    # Prioriza estado de pagos (approved, refunded, in_mediation, etc.)
+    pay_status = None
+    pays = order.get("payments") or []
+    if isinstance(pays, list) and pays:
+        pay_status = (pays[0] or {}).get("status")  # approved/refunded/cancelled/... (si existe)
+    status = pay_status or order.get("status", "")
     created = _parse_ts(order.get("date_created"))
     order_items = order.get("order_items") or []
     item = order_items[0] if order_items else {}
@@ -566,7 +554,7 @@ def sync_meli_orders(days: int = 60):
     st.success(f"✅ Sincronización: {inserted} nuevas · {updated} actualizadas.")
     st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ====== UI DATOS: imagen GRANDE, ASIN link, edición limitada ======
+# ====== UI DATOS: imagen grande, links, filtros, edición limitada ======
 
 if st.session_state.page == "datos":
     st.subheader("📦 Sincronización con Mercado Libre")
@@ -580,13 +568,18 @@ if st.session_state.page == "datos":
     st.markdown("---")
     st.subheader("Tabla de órdenes (DB)")
 
-    # Miniaturas grandes (~700 px ancho) y filas altas (~260 px)
+    # CSS: filas altas y columna imagen angosta (sin espacio sobrante)
     st.markdown("""
         <style>
-        [data-testid="stDataEditor"] tbody tr { height: 260px !important; }
-        [data-testid="stDataFrame"]  tbody tr { height: 260px !important; }
-        [data-testid="stDataEditor"] img { width: 700px !important; height: auto !important; object-fit: contain !important; }
-        [data-testid="stDataFrame"]  img { width: 700px !important; height: auto !important; object-fit: contain !important; }
+        [data-testid="stDataEditor"] tbody tr,
+        [data-testid="stDataFrame"]  tbody tr { height: 220px !important; }
+        [data-testid="stDataEditor"] img,
+        [data-testid="stDataFrame"]  img {
+            max-width: 240px !important;
+            height: auto !important;
+            object-fit: contain !important;
+            display: block; margin: 0 auto;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -602,20 +595,94 @@ if st.session_state.page == "datos":
         )
         df = pd.DataFrame(data)
 
-        # ASIN clickeable -> Amazon
-        def asin_to_url(x: Optional[str]) -> Optional[str]:
-            x = (x or "").strip()
-            if not x:
+        # -------- Filtros "tipo Excel" --------
+        with st.expander("🔎 Filtros", expanded=False):
+            # Valores únicos
+            estados_orden_all = sorted([x for x in df.get("estado_orden", []).dropna().unique().tolist()])
+            estados_envio_all = sorted([x for x in df.get("estado_envio", []).dropna().unique().tolist()])
+            asign_all = sorted([x for x in df.get("asignacion", []).dropna().unique().tolist()])
+
+            c1, c2, c3 = st.columns(3)
+            sel_est_orden = c1.multiselect("Estado orden", estados_orden_all, default=[])
+            sel_est_envio = c2.multiselect("Estado envío", estados_envio_all, default=[])
+            sel_asign = c3.multiselect("Asignación (FBC…)", asign_all, default=[])
+
+            c4, c5, c6 = st.columns(3)
+            txt_asin = c4.text_input("Filtrar ASIN (contiene)")
+            txt_titulo = c5.text_input("Filtrar Título (contiene)")
+            txt_pack = c6.text_input("Pack ID / Orden ML (contiene)")
+
+            # Rango de fechas
+            if "fecha_venta" in df.columns and not df["fecha_venta"].isna().all():
+                min_dt = pd.to_datetime(df["fecha_venta"]).min().date()
+                max_dt = pd.to_datetime(df["fecha_venta"]).max().date()
+            else:
+                today = date.today()
+                min_dt, max_dt = today - timedelta(days=60), today
+            date_from, date_to = st.slider(
+                "Rango de fecha de venta",
+                min_value=min_dt, max_value=max_dt,
+                value=(min_dt, max_dt)
+            )
+
+        # Aplicar filtros
+        if sel_est_orden:
+            df = df[df["estado_orden"].isin(sel_est_orden)]
+        if sel_est_envio:
+            df = df[df["estado_envio"].isin(sel_est_envio)]
+        if sel_asign:
+            df = df[df["asignacion"].isin(sel_asign)]
+        if txt_asin:
+            df = df[df["asin"].fillna("").str.contains(txt_asin, case=False, na=False)]
+        if txt_titulo:
+            df = df[df["titulo"].fillna("").str.contains(txt_titulo, case=False, na=False)]
+        if txt_pack:
+            df = df[
+                df["pack_id"].fillna("").str.contains(txt_pack, case=False, na=False) |
+                df["orden_meli"].fillna("").str.contains(txt_pack, case=False, na=False)
+            ]
+        # fecha
+        if "fecha_venta" in df.columns:
+            dt = pd.to_datetime(df["fecha_venta"], errors="coerce").dt.date
+            df = df[(dt >= date_from) & (dt <= date_to)]
+
+        # -------- Columnas derivadas (links) --------
+        # ASIN → Amazon con cantidad como th=<qty>
+        def asin_url_row(row) -> Optional[str]:
+            asin = (row.get("asin") or "").strip()
+            qty = int(row.get("cantidad") or 1)
+            if not asin:
                 return None
-            return f"https://www.amazon.com/dp/{x}?th=1"
+            return f"https://www.amazon.com/dp/{asin}?th={qty}"
 
-        df["asin_link"] = df.get("asin", "").apply(asin_to_url)
+        df["asin_link"] = df.apply(asin_url_row, axis=1)
 
-        # Orden de columnas (imagen→fecha_venta; orden_amazon a la derecha de cantidad)
+        # Links a detalle ML
+        df["orden_meli_link"] = df["orden_meli"].apply(
+            lambda x: f"https://www.mercadolibre.cl/ventas/{x}/detalle" if x else None
+        )
+        df["pack_id_link"] = df["pack_id"].apply(
+            lambda x: f"https://www.mercadolibre.cl/ventas/{x}/detalle" if x else None
+        )
+
+        # Link a orden Amazon (si el usuario la cargó manualmente)
+        df["orden_amazon_link"] = df["orden_amazon"].apply(
+            lambda x: f"https://www.amazon.com/your-orders/order-details?orderID={x}" if x else None
+        )
+
+        # Orden solicitado (añado columnas de link “🔗” al lado de cada id)
         desired_order = [
-            "id", "url_imagen", "fecha_venta", "asignacion", "orden_meli", "pack_id",
-            "estado_orden", "estado_envio", "asin_link", "cantidad", "orden_amazon",
-            "titulo", "guia", "archivo_adjunto", "descripcion",
+            "id",
+            "url_imagen",
+            "fecha_venta",
+            "asignacion",
+            "orden_meli", "orden_meli_link",
+            "pack_id", "pack_id_link",
+            "estado_orden",
+            "estado_envio",
+            "asin_link", "cantidad", "orden_amazon", "orden_amazon_link",
+            "titulo",
+            "guia", "archivo_adjunto", "descripcion",
             "comentario", "fecha_sincronizacion", "fecha_ingreso", "fecha_impresion",
         ]
         for col in desired_order:
@@ -631,16 +698,27 @@ if st.session_state.page == "datos":
             use_container_width=True,
             hide_index=True,
             column_config={
-                "url_imagen": cc.ImageColumn("Imagen (grande)", help="Miniatura grande", width=700),
+                # imagen grande con columna angosta
+                "url_imagen": cc.ImageColumn("Imagen", help="Miniatura grande", width=240),
+
                 "fecha_venta": cc.DatetimeColumn("Fecha venta"),
                 "asignacion": cc.TextColumn("Asignación"),
+
                 "orden_meli": cc.TextColumn("Orden ML"),
+                "orden_meli_link": cc.LinkColumn("🔗 Orden", help="Abrir en Mercado Libre", width=90, max_chars=30),
+
                 "pack_id": cc.TextColumn("Pack ID"),
+                "pack_id_link": cc.LinkColumn("🔗 Pack", help="Abrir en Mercado Libre", width=90, max_chars=30),
+
                 "estado_orden": cc.TextColumn("Estado orden"),
                 "estado_envio": cc.TextColumn("Estado envío"),
-                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon", width=220),
+
+                "asin_link": cc.LinkColumn("ASIN", help="Abrir en Amazon (th=cantidad)", width=220, max_chars=40),
                 "cantidad": cc.NumberColumn("Cant.", step=1),
+
                 "orden_amazon": cc.TextColumn("Orden Amazon"),
+                "orden_amazon_link": cc.LinkColumn("🔗 Amazon", help="Abrir detalle Amazon", width=110, max_chars=40),
+
                 "titulo": cc.TextColumn("Título"),
                 "guia": cc.TextColumn("Guía (manual)"),
                 "archivo_adjunto": cc.TextColumn("Archivo adjunto (URL PDF)"),
@@ -692,13 +770,12 @@ if st.session_state.page == "datos":
 def upsert_order_note(order_id: str, note_text: str, token: str) -> Tuple[bool, str]:
     """Crea o actualiza la nota de la orden. Si existe, intenta PUT al último note_id; si no, hace POST."""
     headers = _meli_headers(token, {"Content-Type": "application/json"})
-    # leer notas existentes
+    # leer notas existentes para intentar PUT
     note_id = None
     try:
         r = requests.get(f"https://api.mercadolibre.com/orders/{order_id}/notes", headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
-            # normalizar como en _extract_notes_list
             if isinstance(data, list):
                 for entry in data:
                     results = (entry or {}).get("results") or []
